@@ -196,6 +196,69 @@ def _lin_luma(a: np.ndarray) -> np.ndarray:
     """Scene-linear luma; a must be (...,3) in [0,1]."""
     return 0.2126*a[...,0] + 0.7152*a[...,1] + 0.0722*a[...,2]
 
+# ----- Auto-EV helpers -----
+
+def _subsample(arr: np.ndarray, step: int) -> np.ndarray:
+    return arr[::step, ::step, :] if arr.ndim == 3 else arr[::step, ::step]
+
+
+def _bisect_ev(f, target: float, lo: float, hi: float, iters: int) -> float:
+    """Find EV where f(EV) ~= target (f is monotonic in EV)."""
+    for _ in range(max(4, iters)):
+        mid = 0.5*(lo+hi)
+        val = f(mid)
+        if np.isnan(val):
+            hi = mid  # shrink interval
+            continue
+        if val < target:
+            lo = mid
+        else:
+            hi = mid
+    return 0.5*(lo+hi)
+
+
+def _solve_auto_ev(arr01_lin: np.ndarray, tonemap_mode: str,
+                   mid_target: float, mid_pct: float,
+                   hi_pct: float | None, hi_cap: float | None,
+                   ds: int, bounds: tuple[float,float], iters: int) -> dict:
+    """
+    arr01_lin: percentile-stretched linear RGB in [0,1] BEFORE EV.
+    Returns {'ev_mid':..., 'ev_hi':..., 'ev_final':..., 'mid_val':..., 'hi_val':...}
+    """
+    # downsample to speed up
+    a = _subsample(arr01_lin, ds)
+    if a.ndim != 3 or a.shape[-1] < 3:
+        return {"ev_mid": 0.0, "ev_hi": None, "ev_final": 0.0, "mid_val": float("nan"), "hi_val": float("nan")}
+    # evaluate pipeline for a given EV on the sample
+    def eval_ev(ev: float) -> tuple[float, float]:
+        arr_ev = np.clip(a * (2.0**ev), 0.0, None)
+        arr_tm = _tonemap(arr_ev, tonemap_mode)   # still linear
+        Y = _lin_luma(arr_tm)
+        mid_val = float(np.nanpercentile(Y, mid_pct))
+        hi_val = float(np.nanpercentile(Y, hi_pct)) if hi_pct is not None else float("nan")
+        return mid_val, hi_val
+
+    # 1) solve for mid target
+    def f_mid(ev: float) -> float:
+        m, _ = eval_ev(ev); return m
+    ev_mid = _bisect_ev(f_mid, mid_target, bounds[0], bounds[1], iters)
+    mid_val, hi_val_at_mid = eval_ev(ev_mid)
+
+    ev_hi = None
+    if hi_pct is not None and hi_cap is not None and np.isfinite(hi_val_at_mid):
+        # 2) solve highlight cap
+        def f_hi(ev: float) -> float:
+            _, h = eval_ev(ev); return h
+        ev_hi = _bisect_ev(f_hi, hi_cap, bounds[0], bounds[1], iters)
+        # take the safer (darker) EV
+        ev_final = min(ev_mid, ev_hi)
+        _, hi_val = eval_ev(ev_final)
+        return {"ev_mid": ev_mid, "ev_hi": ev_hi, "ev_final": ev_final,
+                "mid_val": mid_val, "hi_val": hi_val}
+    else:
+        return {"ev_mid": ev_mid, "ev_hi": None, "ev_final": ev_mid,
+                "mid_val": mid_val, "hi_val": float("nan")}
+
 
 def _apply_post_gamma_shaping(arr_disp: np.ndarray, dbg=None) -> np.ndarray:
     """arr_disp in [0,1] (after gamma). Apply black/white point, contrast S-curve, saturation."""
@@ -275,13 +338,42 @@ def _to_uint8_rgb(arr: np.ndarray, dbg: MapStats | None = None) -> np.ndarray:
             if arr01.ndim == 2: arr01 = arr01[..., None]
             lo_v, hi_v = 0.0, 65535.0
 
-        # optional auto-EV anchor (on linear luminance)
-        if auto_mid is not None and arr01.ndim == 3 and arr01.shape[-1] >= 3:
-            Yp = float(np.nanpercentile(_lin_luma(arr01), auto_pct))
-            if Yp > 1e-6:
-                gain = auto_mid / Yp
-                arr01 = arr01 * gain
-                if dbg: dbg.__dict__.update(auto_ev_gain=gain, auto_ev_pctval=Yp)
+        # ----- Auto EV (per-image) -----
+        auto_mode = globals().get("AUTO_EV_MODE", "off")
+        manual_ev = globals().get("TIFF_EXPOSURE_EV", 0.0) or 0.0
+        if auto_mode != "off" and arr01.ndim == 3 and arr01.shape[-1] >= 3:
+            # solve EV to hit mid target and guard highlights
+            res = _solve_auto_ev(
+                arr01_lin=arr01,
+                tonemap_mode=globals().get("TIFF_FLOAT_TONEMAP", "none"),
+                mid_target=float(globals().get("AUTO_EV_MID", 0.18)),
+                mid_pct=float(globals().get("AUTO_EV_MID_PCT", 50.0)),
+                hi_pct=float(globals().get("AUTO_EV_HI_PCT", 99.0)) if auto_mode == "mid_guard" else None,
+                hi_cap=float(globals().get("AUTO_EV_HI_CAP", 0.90)) if auto_mode == "mid_guard" else None,
+                ds=int(globals().get("AUTO_EV_DOWNSAMPLE", 8)),
+                bounds=globals().get("AUTO_EV_BOUNDS", (-4.0, 6.0)),
+                iters=int(globals().get("AUTO_EV_ITERS", 16)),
+            )
+            ev_auto = float(res["ev_final"])
+            # apply auto + manual offset
+            arr01 = arr01 * (2.0 ** (ev_auto + manual_ev))
+            if dbg is not None:
+                dbg.__dict__.update(
+                    auto_ev_mode=auto_mode,
+                    auto_ev_mid=res.get("ev_mid"),
+                    auto_ev_hi=res.get("ev_hi"),
+                    auto_ev_final=ev_auto + manual_ev,
+                    auto_mid_target=globals().get("AUTO_EV_MID", 0.18),
+                    auto_mid_pct=globals().get("AUTO_EV_MID_PCT", 50.0),
+                    auto_hi_pct=globals().get("AUTO_EV_HI_PCT", 99.0),
+                    auto_hi_cap=globals().get("AUTO_EV_HI_CAP", 0.90),
+                )
+        else:
+            # apply only manual EV here if auto is off
+            if manual_ev:
+                arr01 = arr01 * (2.0 ** manual_ev)
+        # prevent double EV application in subsequent steps
+        ev = 0.0
 
         # EV, tonemap, gamma
         if ev: arr01 = arr01 * (2.0 ** ev)
@@ -310,12 +402,42 @@ def _to_uint8_rgb(arr: np.ndarray, dbg: MapStats | None = None) -> np.ndarray:
             arr01 = np.clip((arrf - lo_v) / rng, 0.0, 1.0)
             if arr01.ndim == 2: arr01 = arr01[..., None]
 
-        if auto_mid is not None and arr01.ndim == 3 and arr01.shape[-1] >= 3:
-            Yp = float(np.nanpercentile(_lin_luma(arr01), auto_pct))
-            if Yp > 1e-6:
-                gain = auto_mid / Yp
-                arr01 = arr01 * gain
-                if dbg: dbg.__dict__.update(auto_ev_gain=gain, auto_ev_pctval=Yp)
+        # ----- Auto EV (per-image) -----
+        auto_mode = globals().get("AUTO_EV_MODE", "off")
+        manual_ev = globals().get("TIFF_EXPOSURE_EV", 0.0) or 0.0
+        if auto_mode != "off" and arr01.ndim == 3 and arr01.shape[-1] >= 3:
+            # solve EV to hit mid target and guard highlights
+            res = _solve_auto_ev(
+                arr01_lin=arr01,
+                tonemap_mode=globals().get("TIFF_FLOAT_TONEMAP", "none"),
+                mid_target=float(globals().get("AUTO_EV_MID", 0.18)),
+                mid_pct=float(globals().get("AUTO_EV_MID_PCT", 50.0)),
+                hi_pct=float(globals().get("AUTO_EV_HI_PCT", 99.0)) if auto_mode == "mid_guard" else None,
+                hi_cap=float(globals().get("AUTO_EV_HI_CAP", 0.90)) if auto_mode == "mid_guard" else None,
+                ds=int(globals().get("AUTO_EV_DOWNSAMPLE", 8)),
+                bounds=globals().get("AUTO_EV_BOUNDS", (-4.0, 6.0)),
+                iters=int(globals().get("AUTO_EV_ITERS", 16)),
+            )
+            ev_auto = float(res["ev_final"])
+            # apply auto + manual offset
+            arr01 = arr01 * (2.0 ** (ev_auto + manual_ev))
+            if dbg is not None:
+                dbg.__dict__.update(
+                    auto_ev_mode=auto_mode,
+                    auto_ev_mid=res.get("ev_mid"),
+                    auto_ev_hi=res.get("ev_hi"),
+                    auto_ev_final=ev_auto + manual_ev,
+                    auto_mid_target=globals().get("AUTO_EV_MID", 0.18),
+                    auto_mid_pct=globals().get("AUTO_EV_MID_PCT", 50.0),
+                    auto_hi_pct=globals().get("AUTO_EV_HI_PCT", 99.0),
+                    auto_hi_cap=globals().get("AUTO_EV_HI_CAP", 0.90),
+                )
+        else:
+            # apply only manual EV here if auto is off
+            if manual_ev:
+                arr01 = arr01 * (2.0 ** manual_ev)
+        # prevent double EV application in subsequent steps
+        ev = 0.0
 
         if ev: arr01 = arr01 * (2.0 ** ev)
         arr_lin = np.clip(arr01, 0.0, None)
@@ -1020,10 +1142,26 @@ def parse_args():
     p.add_argument("--debug-json", action="store_true", help="Emit per-file debug as JSON lines.")
     p.add_argument("--tiff-float-tonemap", type=str, choices=["none", "reinhard", "aces"],
                    default="none", help="Optional tone mapping for float TIFFs (applied after EV, before gamma).")
-    p.add_argument("--auto-ev-mid", type=float, default=None,
-                   help="Auto-expose: set linear luminance percentile to this value (e.g., 0.18–0.28).")
+    # New Auto-EV options
+    p.add_argument("--auto-ev-mode", type=str, choices=["off","mid","mid_guard"], default="off",
+                   help="Auto exposure per image. 'mid' matches a mid-tone target; 'mid_guard' also caps highlights.")
+    p.add_argument("--auto-ev-mid", type=float, default=0.18,
+                   help="Target mid luminance (after tonemap, before gamma). Typical 0.16–0.22.")
+    p.add_argument("--auto-ev-mid-pct", type=float, default=50.0,
+                   help="Which luminance percentile to anchor for the mid (default median=50).")
+    p.add_argument("--auto-ev-hi-pct", type=float, default=99.0,
+                   help="Highlight percentile to protect (default 99.0).")
+    p.add_argument("--auto-ev-hi-cap", type=float, default=0.90,
+                   help="Max allowed highlight luminance after tonemap (default 0.90).")
+    p.add_argument("--auto-ev-downsample", type=int, default=8,
+                   help="Subsample step for EV solving (e.g., 8 means img[::8,::8]).")
+    p.add_argument("--auto-ev-bounds", type=str, default="-4,6",
+                   help="EV search bounds as 'lo,hi' (default -4..+6).")
+    p.add_argument("--auto-ev-iters", type=int, default=16,
+                   help="Bisection iterations (default 16).")
+    # Back-compat (no longer used):
     p.add_argument("--auto-ev-percentile", type=float, default=50.0,
-                   help="Which luminance percentile to anchor (default 50).")
+                   help="[DEPRECATED] Old auto-EV percentile option (ignored if --auto-ev-mode is used).")
     # Post-gamma shaping options
     p.add_argument("--blackpoint-pct", type=float, default=None,
                    help="After gamma, map this luminance percentile to 0 (e.g., 0.2).")
@@ -1070,8 +1208,20 @@ if __name__ == "__main__":
     TIFF_FLOAT_TONEMAP = args.tiff_float_tonemap
     DEBUG_ON = bool(args.debug or args.debug_json)
     DEBUG_JSON = bool(args.debug_json)
-    AUTO_EV_MID = args.auto_ev_mid          # None or e.g. 0.22
-    AUTO_EV_PCT = args.auto_ev_percentile   # e.g. 50
+
+    # --- Auto-EV globals ---
+    AUTO_EV_MODE = args.auto_ev_mode
+    AUTO_EV_MID = args.auto_ev_mid
+    AUTO_EV_MID_PCT = args.auto_ev_mid_pct
+    AUTO_EV_HI_PCT = args.auto_ev_hi_pct
+    AUTO_EV_HI_CAP = args.auto_ev_hi_cap
+    AUTO_EV_DOWNSAMPLE = max(1, int(args.auto_ev_downsample))
+    try:
+        _lo, _hi = (args.auto_ev_bounds.split(",") if isinstance(args.auto_ev_bounds, str) else ("-4","6"))
+        AUTO_EV_BOUNDS = (float(_lo), float(_hi))
+    except Exception:
+        AUTO_EV_BOUNDS = (-4.0, 6.0)
+    AUTO_EV_ITERS = int(args.auto_ev_iters)
 
     # Post-gamma shaping globals
     BLACKPOINT_PCT = args.blackpoint_pct
