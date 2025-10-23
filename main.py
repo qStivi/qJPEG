@@ -196,6 +196,39 @@ def _lin_luma(a: np.ndarray) -> np.ndarray:
     """Scene-linear luma; a must be (...,3) in [0,1]."""
     return 0.2126*a[...,0] + 0.7152*a[...,1] + 0.0722*a[...,2]
 
+
+def _apply_post_gamma_shaping(arr_disp: np.ndarray, dbg=None) -> np.ndarray:
+    """arr_disp in [0,1] (after gamma). Apply black/white point, contrast S-curve, saturation."""
+    # Black/white point remap on luminance percentiles
+    bp = globals().get("BLACKPOINT_PCT", None)
+    wp = globals().get("WHITEPOINT_PCT", None)
+    if bp is not None or wp is not None:
+        Y = _lin_luma(arr_disp)
+        if bp is None: bp = 0.0
+        if wp is None: wp = 100.0
+        bval = float(np.nanpercentile(Y, bp))
+        wval = float(np.nanpercentile(Y, wp))
+        if wval > bval + 1e-6:
+            arr_disp = np.clip((arr_disp - bval) / (wval - bval), 0.0, 1.0)
+        if dbg is not None:
+            dbg.__dict__.update(bp_pct=bp, wp_pct=wp, bp_val=bval, wp_val=wval)
+
+    # Contrast S-curve (sigmoid around 0.5)
+    c = float(globals().get("CONTRAST_STRENGTH", 0.0) or 0.0)
+    if abs(c) > 1e-6:
+        # gentle: gain ~ 2..4 as c goes 0..0.5
+        gain = 2.0 + 4.0*c*2.0
+        arr_disp = 0.5 + np.tanh((arr_disp - 0.5) * gain) * 0.5
+
+    # Saturation in display space
+    sat = float(globals().get("SATURATION", 1.0))
+    if abs(sat - 1.0) > 1e-6:
+        Y = _lin_luma(arr_disp)[..., None]
+        arr_disp = np.clip(Y + (arr_disp - Y) * sat, 0.0, 1.0)
+
+    return arr_disp
+
+
 def _apply_exposure_and_gamma_01(arr01: np.ndarray, ev: float, gamma: Optional[float]) -> np.ndarray:
     """
     arr01: float32 in [0,1]. Apply exposure (EV) then gamma (to sRGB-like display).
@@ -224,6 +257,8 @@ def _to_uint8_rgb(arr: np.ndarray, dbg: MapStats | None = None) -> np.ndarray:
     auto_pct = float(globals().get("AUTO_EV_PCT", 50.0))
 
     def _finish(arr_disp: np.ndarray):
+        # Apply optional post-gamma shaping (black/white point, contrast, saturation)
+        arr_disp = _apply_post_gamma_shaping(arr_disp, dbg)
         if dbg:
             dbg.out_min = float(arr_disp.min()); dbg.out_max = float(arr_disp.max())
         if arr_disp.shape[-1] == 1:
@@ -945,6 +980,15 @@ def parse_args():
                    help="Auto-expose: set linear luminance percentile to this value (e.g., 0.18–0.28).")
     p.add_argument("--auto-ev-percentile", type=float, default=50.0,
                    help="Which luminance percentile to anchor (default 50).")
+    # Post-gamma shaping options
+    p.add_argument("--blackpoint-pct", type=float, default=None,
+                   help="After gamma, map this luminance percentile to 0 (e.g., 0.2).")
+    p.add_argument("--whitepoint-pct", type=float, default=None,
+                   help="After gamma, map this luminance percentile to 1 (e.g., 99.7).")
+    p.add_argument("--contrast", type=float, default=0.0,
+                   help="Post-gamma S-curve strength (0=no change, try 0.08–0.20).")
+    p.add_argument("--saturation", type=float, default=1.0,
+                   help="Post-gamma saturation multiplier (1=no change, e.g., 1.05).")
     return p.parse_args()
 
 # ----------------------------
@@ -984,6 +1028,12 @@ if __name__ == "__main__":
     DEBUG_JSON = bool(args.debug_json)
     AUTO_EV_MID = args.auto_ev_mid          # None or e.g. 0.22
     AUTO_EV_PCT = args.auto_ev_percentile   # e.g. 50
+
+    # Post-gamma shaping globals
+    BLACKPOINT_PCT = args.blackpoint_pct
+    WHITEPOINT_PCT = args.whitepoint_pct
+    CONTRAST_STRENGTH = args.contrast
+    SATURATION = args.saturation
 
     # --- Diagnostics ---
     print(f"exiftool detected: {'YES' if EXIFTOOL_OK else 'NO'}")
