@@ -26,6 +26,13 @@ import numpy as np
 from PIL import Image, ImageFile
 from skimage.metrics import structural_similarity as ssim
 
+import time
+try:
+    from tqdm.auto import tqdm
+    HAVE_TQDM = True
+except Exception:
+    HAVE_TQDM = False
+
 # Allow truncated reads for TIFF/JPEG
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
@@ -69,6 +76,7 @@ DEFAULT_BRISQUE_RANGE = str(SCRIPT_DIR / "brisque_range_live.yml")
 # Smart 16-bit TIFF scaling controls (set from CLI at startup)
 TIFF_SMART16: bool = False
 TIFF_SMART16_PCTS: Tuple[float, float] = (0.5, 99.5)  # (low, high)
+TIFF_SMART16_PERCHANNEL: bool = True  # default to per-channel stretch; set False to use global curve
 
 
 def ensure_dir(path: Path):
@@ -104,12 +112,44 @@ def _to_uint8_rgb(arr: np.ndarray) -> np.ndarray:
     if arr.dtype == np.uint16:
         if TIFF_SMART16:
             lo, hi = TIFF_SMART16_PCTS
-            lo_v, hi_v = np.percentile(arr, (lo, hi))
-            if hi_v <= lo_v:  # degenerate; fallback
-                arr8 = (arr >> 8).astype(np.uint8)
+            arrf = arr.astype(np.float32)
+            if arrf.ndim == 2:  # gray
+                lo_v, hi_v = np.percentile(arrf, (lo, hi))
+                if hi_v <= lo_v:
+                    arr8 = (arr >> 8).astype(np.uint8)
+                else:
+                    arrf = np.clip((arrf - lo_v) / (hi_v - lo_v), 0.0, 1.0)
+                    arr8 = (arrf * 255.0 + 0.5).astype(np.uint8)
             else:
-                arrf = np.clip((arr.astype(np.float32) - lo_v) / (hi_v - lo_v), 0.0, 1.0)
-                arr8 = (arrf * 255.0 + 0.5).astype(np.uint8)
+                # color image
+                h, w = arrf.shape[:2]
+                c = arrf.shape[2] if arrf.ndim == 3 else 1
+                if c == 1:
+                    arr8 = (arr >> 8).astype(np.uint8)
+                else:
+                    out = np.empty((h, w, 3), np.uint8)
+                    if TIFF_SMART16_PERCHANNEL:
+                        # per-channel stretch: can increase pop/saturation, may shift color slightly
+                        for ch in range(min(c, 3)):
+                            lo_v, hi_v = np.percentile(arrf[..., ch], (lo, hi))
+                            if hi_v <= lo_v:
+                                out[..., ch] = (arr[..., ch] >> 8).astype(np.uint8)
+                            else:
+                                chf = np.clip((arrf[..., ch] - lo_v) / (hi_v - lo_v), 0.0, 1.0)
+                                out[..., ch] = (chf * 255.0 + 0.5).astype(np.uint8)
+                    else:
+                        # global stretch: same curve for all channels, preserves color ratios better
+                        lo_v, hi_v = np.percentile(arrf, (lo, hi))
+                        if hi_v <= lo_v:
+                            out = (arr[..., :3] >> 8).astype(np.uint8)
+                        else:
+                            arrn = np.clip((arrf - lo_v) / (hi_v - lo_v), 0.0, 1.0)
+                            out = (arrn[..., :3] * 255.0 + 0.5).astype(np.uint8)
+
+                    if c < 3:
+                        for ch in range(c, 3):
+                            out[..., ch] = out[..., c-1]
+                    arr8 = out
         else:
             arr8 = (arr >> 8).astype(np.uint8)
     elif np.issubdtype(arr.dtype, np.floating):
@@ -494,6 +534,7 @@ def process_tree(
         no_brisque: bool,
         allow_exts: Optional[Set[str]],
         demosaic_name: Optional[str],
+        show_progress: bool,
 ):
     out_root = input_root.parent / f"{input_root.name}_compressed"
     out_root.mkdir(parents=True, exist_ok=True)
@@ -515,6 +556,25 @@ def process_tree(
     results: List[Optional[Dict[str, Any]]] = []
     total = len(files)
     print(f"Discovered {total} image(s). Processing with {workers} worker(s)...")
+
+    # Progress bar / ETA setup
+    start = time.time()
+    use_bar = (show_progress and HAVE_TQDM and total > 0)
+    pbar = tqdm(total=total, unit="img") if use_bar else None
+
+    def _tick():
+        if use_bar:
+            elapsed = time.time() - start
+            sofar = pbar.n + 1  # +1 for this tick
+            rate = sofar / elapsed if elapsed > 0 else 0.0
+            eta = (total - sofar) / rate if rate > 0 else 0.0
+            pbar.update(1)
+            pbar.set_postfix_str(
+                f"elapsed {int(elapsed//60)}m{int(elapsed%60):02d}s | eta {int(eta//60)}m{int(eta%60):02d}s"
+            )
+        else:
+            # quiet fallback; per-file lines still print
+            pass
 
     task_kwargs = dict(
         input_root=str(input_root),
@@ -544,6 +604,7 @@ def process_tree(
                       f"quality={res['quality']}, SSIM={res['ssim']:.4f}"
                       + (f", BRISQUE={res['brisque']:.2f}" if res['brisque'] is not None else "")
                       + (f" | saved {res['saved_pct']:.1f}%" if 'saved_pct' in res and res['saved_pct'] is not None else ""))
+            _tick()
             results.append(res)
     else:
         with ProcessPoolExecutor(max_workers=workers) as ex:
@@ -559,7 +620,12 @@ def process_tree(
                           f"quality={res['quality']}, SSIM={res['ssim']:.4f}"
                           + (f", BRISQUE={res['brisque']:.2f}" if res['brisque'] is not None else "")
                           + (f" | saved {res['saved_pct']:.1f}%" if 'saved_pct' in res and res['saved_pct'] is not None else ""))
+                _tick()
                 results.append(res)
+
+    # Close progress bar
+    if 'pbar' in locals() and pbar is not None:
+        pbar.close()
 
     # Summary
     done = sum(1 for r in results if r and not r.get("skipped") and "error" not in r)
@@ -603,9 +669,13 @@ def parse_args():
                    help="Enable smart 16-bit TIFF scaling (percentile stretch to 8-bit).")
     p.add_argument("--tiff-smart16-pct", type=str, default="0.5,99.5",
                    help="Low,High percentiles for smart 16-bit scaling (default: '0.5,99.5').")
+    p.add_argument("--tiff-smart16-perchannel", action="store_true",
+                   help="With --tiff-smart16, stretch each RGB channel independently (more punch, may shift color slightly). If omitted, uses a single global curve for all channels (safer colors).")
     p.add_argument("--demosaic", type=str, default="AHD",
                    choices=["AHD", "LINEAR", "AMAZE"],
                    help="RAW demosaic algorithm (default: AHD). AMAZE needs GPL3 libraw; will fallback if unavailable.")
+    p.add_argument("--no-progress", action="store_true",
+                   help="Disable progress bar / ETA output.")
     return p.parse_args()
 
 # ----------------------------
@@ -633,6 +703,8 @@ if __name__ == "__main__":
     except Exception:
         TIFF_SMART16_PCTS = (0.5, 99.5)
 
+    # --- TIFF smart16 per-channel toggle ---
+    TIFF_SMART16_PERCHANNEL = bool(getattr(args, "tiff_smart16_perchannel", False)) or TIFF_SMART16_PERCHANNEL
 
     # --- Diagnostics ---
     print(f"exiftool detected: {'YES' if EXIFTOOL_OK else 'NO'}")
@@ -665,4 +737,5 @@ if __name__ == "__main__":
         no_brisque=args.no_brisque,
         allow_exts=ALLOW_EXTS,
         demosaic_name=args.demosaic,
+        show_progress=(not args.no_progress),
     )
