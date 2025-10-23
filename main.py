@@ -83,7 +83,7 @@ DEFAULT_BRISQUE_RANGE = str(SCRIPT_DIR / "brisque_range_live.yml")
 # Smart 16-bit TIFF scaling controls (set from CLI at startup)
 TIFF_SMART16: bool = False
 TIFF_SMART16_PCTS: Tuple[float, float] = (0.5, 99.5)  # (low, high)
-TIFF_SMART16_PERCHANNEL: bool = True  # default to per-channel stretch; set False to use global curve
+TIFF_SMART16_PERCHANNEL: bool = False  # default to per-channel stretch; set False to use global curve
 # Exposure/Gamma globals for 16-bit TIFF mapping (set in __main__ from CLI)
 TIFF_GAMMA: Optional[float] = None
 TIFF_EXPOSURE_EV: float = 0.0
@@ -924,6 +924,50 @@ def process_tree(
     return results
 
 # ----------------------------
+# Utility: play a sound when done
+# ----------------------------
+
+def _play_finish_sound():
+    try:
+        snd = Path(__file__).resolve().with_name("microwave-ding-104123.mp3")
+        if not snd.exists():
+            return
+        # Prefer platform native players to avoid adding dependencies
+        player = None
+        args = None
+        # macOS
+        if shutil.which("afplay"):
+            player = "afplay"
+            args = [player, str(snd)]
+        # Linux options
+        elif shutil.which("paplay"):
+            player = "paplay"
+            args = [player, str(snd)]
+        elif shutil.which("aplay"):
+            player = "aplay"
+            args = [player, str(snd)]
+        elif shutil.which("ffplay"):
+            player = "ffplay"
+            args = [player, "-nodisp", "-autoexit", str(snd)]
+        # Fallback to playsound if available (may not support all platforms reliably)
+        if args is not None:
+            try:
+                subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                return
+            except Exception:
+                pass
+        try:
+            from playsound import playsound  # type: ignore
+            import threading
+            threading.Thread(target=lambda: playsound(str(snd)), daemon=True).start()
+        except Exception:
+            # Last resort: do nothing
+            pass
+    except Exception:
+        # Never let the notifier crash the main script
+        pass
+
+# ----------------------------
 # CLI
 # ----------------------------
 def parse_args():
@@ -1050,27 +1094,30 @@ if __name__ == "__main__":
     print(f"BRISQUE model file: {mp} ({'FOUND' if os.path.exists(mp) else 'MISSING'})")
     print(f"BRISQUE range file: {rp} ({'FOUND' if os.path.exists(rp) else 'MISSING'})\n")
 
-    process_tree(
-        input_root=input_root,
-        ssim_thr=args.ssim,
-        qmin=args.qmin,
-        qmax=args.qmax,
-        progressive=args.progressive,
-        subsampling=args.subsampling,
-        brisque_model=args.brisque_model,
-        brisque_range=args.brisque_range,
-        mirror_structure=(not args.flat),
-        flat_dedupe=args.flat,     # only used when flat mode is on
-        resume=args.resume,
-        workers=max(1, args.workers),
-        no_brisque=args.no_brisque,
-        allow_exts=ALLOW_EXTS,
-        demosaic_name=args.demosaic,
-        show_progress=(not args.no_progress),
-        tiff_apply_icc=args.tiff_apply_icc,
-        tiff_gamma=args.tiff_gamma,
-        tiff_exposure_ev=args.tiff_exposure_ev,
-        tiff_reader=args.tiff_reader,
-        debug=args.debug,
-        debug_json=args.debug_json,
-    )
+    try:
+        process_tree(
+            input_root=input_root,
+            ssim_thr=args.ssim,
+            qmin=args.qmin,
+            qmax=args.qmax,
+            progressive=args.progressive,
+            subsampling=args.subsampling,
+            brisque_model=args.brisque_model,
+            brisque_range=args.brisque_range,
+            mirror_structure=(not args.flat),
+            flat_dedupe=args.flat,     # only used when flat mode is on
+            resume=args.resume,
+            workers=max(1, args.workers),
+            no_brisque=args.no_brisque,
+            allow_exts=ALLOW_EXTS,
+            demosaic_name=args.demosaic,
+            show_progress=(not args.no_progress),
+            tiff_apply_icc=args.tiff_apply_icc,
+            tiff_gamma=args.tiff_gamma,
+            tiff_exposure_ev=args.tiff_exposure_ev,
+            tiff_reader=args.tiff_reader,
+            debug=args.debug,
+            debug_json=args.debug_json,
+        )
+    finally:
+        _play_finish_sound()
