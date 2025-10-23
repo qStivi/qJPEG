@@ -192,6 +192,10 @@ def _tonemap(arr: np.ndarray, mode: str) -> np.ndarray:
         return np.clip((arr*(a*arr + b)) / (arr*(c*arr + d) + e), 0.0, 1.0)
     return arr
 
+def _lin_luma(a: np.ndarray) -> np.ndarray:
+    """Scene-linear luma; a must be (...,3) in [0,1]."""
+    return 0.2126*a[...,0] + 0.7152*a[...,1] + 0.0722*a[...,2]
+
 def _apply_exposure_and_gamma_01(arr01: np.ndarray, ev: float, gamma: Optional[float]) -> np.ndarray:
     """
     arr01: float32 in [0,1]. Apply exposure (EV) then gamma (to sRGB-like display).
@@ -203,13 +207,12 @@ def _apply_exposure_and_gamma_01(arr01: np.ndarray, ev: float, gamma: Optional[f
         arr01 = np.power(arr01, 1.0 / gamma)  # linear -> display
     return arr01
 
-def _to_uint8_rgb(arr: np.ndarray, dbg: Optional[MapStats] = None) -> np.ndarray:
+def _to_uint8_rgb(arr: np.ndarray, dbg: MapStats | None = None) -> np.ndarray:
     """
-    Convert TIFF array (uint16 or float) to 8-bit RGB, honoring:
-    - smart percentile stretch (also for float!)
-    - EV and gamma
-    - optional tonemap for float
-    Fills dbg with min/max and lo/hi stats when provided.
+    Map uint16/float TIFF data to 8-bit RGB using:
+      - percentile stretch (applies to float too)
+      - optional auto-EV anchor
+      - EV, optional tonemap, gamma
     """
     ev = globals().get("TIFF_EXPOSURE_EV", 0.0)
     gamma = globals().get("TIFF_GAMMA", None)
@@ -217,85 +220,87 @@ def _to_uint8_rgb(arr: np.ndarray, dbg: Optional[MapStats] = None) -> np.ndarray
     use_smart = bool(globals().get("TIFF_SMART16", False))
     per_channel = bool(globals().get("TIFF_SMART16_PERCHANNEL", True))
     lo, hi = globals().get("TIFF_SMART16_PCTS", (0.5, 99.5))
+    auto_mid = globals().get("AUTO_EV_MID", None)
+    auto_pct = float(globals().get("AUTO_EV_PCT", 50.0))
 
-    # ---------------- uint16 ----------------
+    def _finish(arr_disp: np.ndarray):
+        if dbg:
+            dbg.out_min = float(arr_disp.min()); dbg.out_max = float(arr_disp.max())
+        if arr_disp.shape[-1] == 1:
+            arr_disp = np.repeat(arr_disp, 3, axis=-1)
+        return (arr_disp * 255.0 + 0.5).astype(np.uint8)
+
+    # -------- uint16 --------
     if arr.dtype == np.uint16:
         arrf = arr.astype(np.float32)
         if use_smart:
             arr01, lo_v, hi_v = _percentile_stretch(arrf, lo, hi, per_channel)
         else:
             arr01 = arrf / 65535.0
-            if arr01.ndim == 2:
-                arr01 = arr01[..., None]
-            lo_v = 0.0; hi_v = 65535.0
-        # EV + gamma (display)
-        if ev:
-            arr01 = arr01 * (2.0 ** ev)
-        arr01 = np.clip(arr01, 0.0, 1.0)
-        if gamma and gamma > 0:
-            arr01 = np.power(arr01, 1.0 / gamma)
+            if arr01.ndim == 2: arr01 = arr01[..., None]
+            lo_v, hi_v = 0.0, 65535.0
+
+        # optional auto-EV anchor (on linear luminance)
+        if auto_mid is not None and arr01.ndim == 3 and arr01.shape[-1] >= 3:
+            Yp = float(np.nanpercentile(_lin_luma(arr01), auto_pct))
+            if Yp > 1e-6:
+                gain = auto_mid / Yp
+                arr01 = arr01 * gain
+                if dbg: dbg.__dict__.update(auto_ev_gain=gain, auto_ev_pctval=Yp)
+
+        # EV, tonemap, gamma
+        if ev: arr01 = arr01 * (2.0 ** ev)
+        arr_lin = np.clip(arr01, 0.0, None)
+        arr_tm = _tonemap(arr_lin, tonemap_mode)
+        arr_tm = np.clip(arr_tm, 0.0, 1.0)
+        arr_disp = np.power(arr_tm, 1.0 / gamma) if (gamma and gamma > 0) else arr_tm
 
         if dbg:
             dbg.src_min = float(arrf.min()); dbg.src_max = float(arrf.max())
             dbg.p_lo = lo; dbg.p_hi = hi; dbg.per_channel = per_channel
             dbg.src_lo_val = lo_v; dbg.src_hi_val = hi_v
-            dbg.ev_applied = ev; dbg.gamma_applied = gamma
-            dbg.tonemap = "none"
-            dbg.out_min = float(arr01.min()); dbg.out_max = float(arr01.max())
+            dbg.ev_applied = ev; dbg.gamma_applied = gamma; dbg.tonemap = "none"
+            dbg.__dict__.update(linY_p50_pre=float(np.nanpercentile(_lin_luma(arr01),50)),
+                                linY_p50_post=float(np.nanpercentile(_lin_luma(arr_tm),50)))
+        return _finish(arr_disp)
 
-        if arr01.shape[-1] == 1:
-            arr01 = np.repeat(arr01, 3, axis=-1)
-        return (arr01 * 255.0 + 0.5).astype(np.uint8)
-
-    # ---------------- float32/64 ----------------
+    # -------- float32/64 --------
     if np.issubdtype(arr.dtype, np.floating):
         arrf = arr.astype(np.float32)
-        # Robust range (like smart16), now applied to float as well
         if use_smart:
             arr01, lo_v, hi_v = _percentile_stretch(arrf, lo, hi, per_channel)
         else:
-            # if user disables smart, try to normalize by the visible energy
-            # assume typical linear floats are around [0,1] but may exceed
             lo_v, hi_v = float(np.nanmin(arrf)), float(np.nanpercentile(arrf, 99.9))
             rng = max(1e-6, hi_v - lo_v)
             arr01 = np.clip((arrf - lo_v) / rng, 0.0, 1.0)
-            if arr01.ndim == 2:
-                arr01 = arr01[..., None]
+            if arr01.ndim == 2: arr01 = arr01[..., None]
 
-        # Exposure first (still linear)
-        if ev:
-            arr_lin = arr01 * (2.0 ** ev)
-        else:
-            arr_lin = arr01
+        if auto_mid is not None and arr01.ndim == 3 and arr01.shape[-1] >= 3:
+            Yp = float(np.nanpercentile(_lin_luma(arr01), auto_pct))
+            if Yp > 1e-6:
+                gain = auto_mid / Yp
+                arr01 = arr01 * gain
+                if dbg: dbg.__dict__.update(auto_ev_gain=gain, auto_ev_pctval=Yp)
 
-        # Optional tonemap while still linear and before gamma
-        arr_lin = np.maximum(arr_lin, 0.0)
+        if ev: arr01 = arr01 * (2.0 ** ev)
+        arr_lin = np.clip(arr01, 0.0, None)
         arr_tm = _tonemap(arr_lin, tonemap_mode)
-
-        # Clip (after tonemap) and apply display gamma if requested
         arr_tm = np.clip(arr_tm, 0.0, 1.0)
-        if gamma and gamma > 0:
-            arr_disp = np.power(arr_tm, 1.0 / gamma)
-        else:
-            arr_disp = arr_tm
+        arr_disp = np.power(arr_tm, 1.0 / gamma) if (gamma and gamma > 0) else arr_tm
 
         if dbg:
             dbg.src_min = float(np.nanmin(arrf)); dbg.src_max = float(np.nanmax(arrf))
             dbg.p_lo = lo; dbg.p_hi = hi; dbg.per_channel = per_channel
             dbg.src_lo_val = lo_v; dbg.src_hi_val = hi_v
             dbg.ev_applied = ev; dbg.gamma_applied = gamma; dbg.tonemap = tonemap_mode
-            dbg.out_min = float(arr_disp.min()); dbg.out_max = float(arr_disp.max())
+            dbg.__dict__.update(linY_p50_pre=float(np.nanpercentile(_lin_luma(arr01),50)),
+                                linY_p50_post=float(np.nanpercentile(_lin_luma(arr_tm),50)))
+        return _finish(arr_disp)
 
-        if arr_disp.shape[-1] == 1:
-            arr_disp = np.repeat(arr_disp, 3, axis=-1)
-        return (arr_disp * 255.0 + 0.5).astype(np.uint8)
-
-    # ---------------- fallback: already 8/16 int ----------------
+    # -------- already 8-bit etc. --------
     arr8 = arr.astype(np.uint8, copy=False)
-    if arr8.ndim == 2:
-        return np.stack([arr8, arr8, arr8], axis=-1)
-    if arr8.ndim == 3 and arr8.shape[-1] >= 3:
-        return arr8[:, :, :3]
+    if arr8.ndim == 2: return np.stack([arr8, arr8, arr8], axis=-1)
+    if arr8.ndim == 3 and arr8.shape[-1] >= 3: return arr8[:, :, :3]
     return np.repeat(arr8[..., None], 3, axis=-1)
 
 def _open_tiff_robust(path: Path, tiff_apply_icc: bool, tiff_gamma: Optional[float], tiff_exposure_ev: float,
@@ -694,24 +699,27 @@ def process_one(
         dst_size = 0
     saved = (1 - (dst_size / src_size)) * 100 if src_size > 0 else 0.0
 
-    if tiff_reader and info.get("debug") and (tiff_reader in ("tifffile", "auto")):
+    if info.get("debug") and (debug or debug_json):
         dbg = info["debug"]
-        if debug:
-            if debug_json:
-                print(json.dumps({"file": str(src_path_p), **dbg}, ensure_ascii=False))
-            else:
-                print("[DEBUG]", src_path_p)
-                print("        loader=", dbg.get("loader"),
-                      "| dtype=", dbg.get("dtype"), "| shape=", dbg.get("shape"))
-                print("        bits/sample=", dbg.get("bits_per_sample"),
-                      "| sample_format=", dbg.get("sample_format"),
-                      "| photometric=", dbg.get("photometric"))
-                print(f"        src_min/max={dbg.get('src_min'):.6g}/{dbg.get('src_max'):.6g} "
-                      f"| pcts({dbg.get('p_lo')},{dbg.get('p_hi')})="
-                      f"{dbg.get('src_lo_val')} → {dbg.get('src_hi_val')}")
-                print(f"        EV={dbg.get('ev_applied')} | gamma={dbg.get('gamma_applied')} "
-                      f"| tonemap={dbg.get('tonemap')} | ICC-applied={dbg.get('icc_applied')}")
-                print(f"        out_min/max={dbg.get('out_min'):.6g}/{dbg.get('out_max'):.6g}")
+        if debug_json:
+            print(json.dumps({"file": str(src_path_p), **dbg}, ensure_ascii=False))
+        else:
+            print("[DEBUG]", src_path_p)
+            print("        loader=", dbg.get("loader"),
+                  "| dtype=", dbg.get("dtype"), "| shape=", dbg.get("shape"))
+            print("        bits/sample=", dbg.get("bits_per_sample"),
+                  "| sample_format=", dbg.get("sample_format"),
+                  "| photometric=", dbg.get("photometric"))
+            print(f"        src_min/max={dbg.get('src_min'):.6g}/{dbg.get('src_max'):.6g} "
+                  f"| pcts({dbg.get('p_lo')},{dbg.get('p_hi')})="
+                  f"{dbg.get('src_lo_val')} → {dbg.get('src_hi_val')}")
+            if 'auto_ev_gain' in dbg:
+                print(f"        autoEV: pct={dbg.get('auto_ev_pctval'):.6g} → gain={dbg.get('auto_ev_gain'):.3f}")
+            print(f"        EV={dbg.get('ev_applied')} | gamma={dbg.get('gamma_applied')} "
+                  f"| tonemap={dbg.get('tonemap')} | ICC-applied={dbg.get('icc_applied')}")
+            if 'linY_p50_pre' in dbg:
+                print(f"        linY p50 pre/post={dbg['linY_p50_pre']:.4f}/{dbg['linY_p50_post']:.4f}")
+            print(f"        out_min/max={dbg.get('out_min'):.6g}/{dbg.get('out_max'):.6g}")
 
     return {
         "src": str(src_path_p),
@@ -933,6 +941,10 @@ def parse_args():
     p.add_argument("--debug-json", action="store_true", help="Emit per-file debug as JSON lines.")
     p.add_argument("--tiff-float-tonemap", type=str, choices=["none", "reinhard", "aces"],
                    default="none", help="Optional tone mapping for float TIFFs (applied after EV, before gamma).")
+    p.add_argument("--auto-ev-mid", type=float, default=None,
+                   help="Auto-expose: set linear luminance percentile to this value (e.g., 0.18–0.28).")
+    p.add_argument("--auto-ev-percentile", type=float, default=50.0,
+                   help="Which luminance percentile to anchor (default 50).")
     return p.parse_args()
 
 # ----------------------------
@@ -970,6 +982,8 @@ if __name__ == "__main__":
     TIFF_FLOAT_TONEMAP = args.tiff_float_tonemap
     DEBUG_ON = bool(args.debug or args.debug_json)
     DEBUG_JSON = bool(args.debug_json)
+    AUTO_EV_MID = args.auto_ev_mid          # None or e.g. 0.22
+    AUTO_EV_PCT = args.auto_ev_percentile   # e.g. 50
 
     # --- Diagnostics ---
     print(f"exiftool detected: {'YES' if EXIFTOOL_OK else 'NO'}")
