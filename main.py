@@ -24,6 +24,11 @@ from typing import Optional, Tuple, Set, List, Dict, Any
 
 import numpy as np
 from PIL import Image, ImageFile
+try:
+    from PIL import ImageCms
+    HAVE_IMAGECMS = True
+except Exception:
+    HAVE_IMAGECMS = False
 from skimage.metrics import structural_similarity as ssim
 
 import time
@@ -77,6 +82,9 @@ DEFAULT_BRISQUE_RANGE = str(SCRIPT_DIR / "brisque_range_live.yml")
 TIFF_SMART16: bool = False
 TIFF_SMART16_PCTS: Tuple[float, float] = (0.5, 99.5)  # (low, high)
 TIFF_SMART16_PERCHANNEL: bool = True  # default to per-channel stretch; set False to use global curve
+# Exposure/Gamma globals for 16-bit TIFF mapping (set in __main__ from CLI)
+TIFF_GAMMA: Optional[float] = None
+TIFF_EXPOSURE_EV: float = 0.0
 
 
 def ensure_dir(path: Path):
@@ -107,51 +115,73 @@ def copy_sidecars(src_path: Path, dst_path_without_ext: Path):
 # ----------------------------
 # Robust loading
 # ----------------------------
+def _apply_exposure_and_gamma_01(arr01: np.ndarray, ev: float, gamma: Optional[float]) -> np.ndarray:
+    """
+    arr01: float32 in [0,1]. Apply exposure (EV) then gamma (to sRGB-like display).
+    """
+    if ev and ev != 0.0:
+        arr01 = arr01 * (2.0 ** ev)
+    arr01 = np.clip(arr01, 0.0, 1.0)
+    if gamma and gamma > 0:
+        arr01 = np.power(arr01, 1.0 / gamma)  # linear -> display
+    return arr01
+
 def _to_uint8_rgb(arr: np.ndarray) -> np.ndarray:
     """Convert various TIFF array dtypes/shapes to 8-bit RGB (optionally with smart 16-bit percentile stretch)."""
     if arr.dtype == np.uint16:
+        # normalize to [0,1] first (with smart percentile if enabled)
         if TIFF_SMART16:
             lo, hi = TIFF_SMART16_PCTS
             arrf = arr.astype(np.float32)
+
             if arrf.ndim == 2:  # gray
                 lo_v, hi_v = np.percentile(arrf, (lo, hi))
                 if hi_v <= lo_v:
-                    arr8 = (arr >> 8).astype(np.uint8)
+                    arr01 = (arr / 65535.0).astype(np.float32)
                 else:
-                    arrf = np.clip((arrf - lo_v) / (hi_v - lo_v), 0.0, 1.0)
-                    arr8 = (arrf * 255.0 + 0.5).astype(np.uint8)
+                    arr01 = np.clip((arrf - lo_v) / (hi_v - lo_v), 0.0, 1.0)
+                arr01 = arr01[..., None]  # make 3-ch later
+
             else:
-                # color image
                 h, w = arrf.shape[:2]
                 c = arrf.shape[2] if arrf.ndim == 3 else 1
                 if c == 1:
-                    arr8 = (arr >> 8).astype(np.uint8)
+                    arr01 = (arr / 65535.0).astype(np.float32)[..., None]
                 else:
-                    out = np.empty((h, w, 3), np.uint8)
-                    if TIFF_SMART16_PERCHANNEL:
-                        # per-channel stretch: can increase pop/saturation, may shift color slightly
+                    out01 = np.empty((h, w, 3), np.float32)
+                    if 'TIFF_SMART16_PERCHANNEL' in globals() and TIFF_SMART16_PERCHANNEL:
                         for ch in range(min(c, 3)):
                             lo_v, hi_v = np.percentile(arrf[..., ch], (lo, hi))
                             if hi_v <= lo_v:
-                                out[..., ch] = (arr[..., ch] >> 8).astype(np.uint8)
+                                out01[..., ch] = (arr[..., ch] / 65535.0).astype(np.float32)
                             else:
                                 chf = np.clip((arrf[..., ch] - lo_v) / (hi_v - lo_v), 0.0, 1.0)
-                                out[..., ch] = (chf * 255.0 + 0.5).astype(np.uint8)
+                                out01[..., ch] = chf
                     else:
-                        # global stretch: same curve for all channels, preserves color ratios better
                         lo_v, hi_v = np.percentile(arrf, (lo, hi))
                         if hi_v <= lo_v:
-                            out = (arr[..., :3] >> 8).astype(np.uint8)
+                            out01 = (arr[..., :3] / 65535.0).astype(np.float32)
                         else:
-                            arrn = np.clip((arrf - lo_v) / (hi_v - lo_v), 0.0, 1.0)
-                            out = (arrn[..., :3] * 255.0 + 0.5).astype(np.uint8)
-
+                            out01 = np.clip((arrf - lo_v) / (hi_v - lo_v), 0.0, 1.0)[..., :3]
                     if c < 3:
                         for ch in range(c, 3):
-                            out[..., ch] = out[..., c-1]
-                    arr8 = out
+                            out01[..., ch] = out01[..., c-1]
+                    arr01 = out01
         else:
-            arr8 = (arr >> 8).astype(np.uint8)
+            # simple linear mapping to [0,1]
+            arr01 = (arr.astype(np.float32) / 65535.0)
+            if arr01.ndim == 2:
+                arr01 = arr01[..., None]
+
+        # exposure & gamma (globals set in __main__)
+        ev = globals().get("TIFF_EXPOSURE_EV", 0.0)
+        gamma = globals().get("TIFF_GAMMA", None)
+        arr01 = _apply_exposure_and_gamma_01(arr01, ev=ev, gamma=gamma)
+
+        # go to uint8 RGB
+        if arr01.shape[-1] == 1:
+            arr01 = np.repeat(arr01, 3, axis=-1)
+        arr8 = (arr01 * 255.0 + 0.5).astype(np.uint8)
     elif np.issubdtype(arr.dtype, np.floating):
         arr8 = np.clip(arr, 0.0, 1.0)
         arr8 = (arr8 * 255.0 + 0.5).astype(np.uint8)
@@ -169,44 +199,87 @@ def _to_uint8_rgb(arr: np.ndarray) -> np.ndarray:
             return arr8[:, :, :3]
     return np.repeat(arr8[..., None], 3, axis=-1)
 
-def _open_tiff_robust(path: Path) -> Image.Image:
-    """Try Pillow first; fall back to tifffile with safer reading for truncated/odd TIFFs."""
+def _open_tiff_robust(path: Path, tiff_apply_icc: bool, tiff_gamma: Optional[float], tiff_exposure_ev: float,
+                      tiff_reader: str = "auto") -> Image.Image:
+    """Try Pillow and/or tifffile according to tiff_reader selector; safer reading for truncated/odd TIFFs."""
+    use_pillow = (tiff_reader in ("auto", "pillow"))
+    use_tifffile = (tiff_reader in ("auto", "tifffile"))
+
     # 1) Try Pillow
-    try:
-        with Image.open(path) as im:
-            return im.convert("RGB")
-    except Exception:
-        pass
-
-    # 2) tifffile fallback
-    try:
-        import tifffile as tiff
-    except Exception as e:
-        raise RuntimeError(f"Cannot open TIFF with Pillow and tifffile not installed: {e}")
-
-    # attempt simple imread first (single array)
-    try:
-        arr = tiff.imread(str(path), maxworkers=0)
-        arr8 = _to_uint8_rgb(arr)
-        return Image.fromarray(arr8, mode="RGB")
-    except Exception:
-        pass
-
-    # manual pages walk as last resort
-    with tiff.TiffFile(str(path)) as tf:
-        pages = list(tf.pages)
-        if not pages:
-            raise RuntimeError("Empty TIFF (no pages).")
-        # choose largest page by pixel count
-        page = max(pages, key=lambda p: (int(p.imagelength or 0) * int(p.imagewidth or 0)))
+    if use_pillow:
         try:
-            arr = page.asarray(maxworkers=0)
+            with Image.open(path) as im:
+                if tiff_apply_icc and HAVE_IMAGECMS and "icc_profile" in im.info and im.info.get("icc_profile"):
+                    try:
+                        src = ImageCms.ImageCmsProfile(io.BytesIO(im.info["icc_profile"]))
+                        dst = ImageCms.createProfile("sRGB")
+                        im = ImageCms.profileToProfile(im, src, dst, outputMode="RGB")
+                    except Exception:
+                        im = im.convert("RGB")
+                else:
+                    im = im.convert("RGB")
+
+                # Apply EV + GAMMA on Pillow path too
+                if (tiff_exposure_ev and tiff_exposure_ev != 0.0) or (tiff_gamma and tiff_gamma > 0):
+                    arr01 = np.asarray(im, dtype=np.float32) / 255.0
+                    arr01 = _apply_exposure_and_gamma_01(arr01, ev=tiff_exposure_ev, gamma=tiff_gamma)
+                    im = Image.fromarray(np.clip(arr01 * 255.0 + 0.5, 0, 255).astype(np.uint8), mode="RGB")
+
+                return im
         except Exception:
-            # some very broken files: try memmap then copy
-            arr = page.asarray(out='memmap')
-            arr = np.array(arr, copy=True)
-    arr8 = _to_uint8_rgb(arr)
-    return Image.fromarray(arr8, mode="RGB")
+            # fall through to tifffile if allowed
+            if tiff_reader == "pillow":
+                raise
+            pass
+
+    # 2) tifffile path
+    if use_tifffile:
+        try:
+            import tifffile as tiff
+        except Exception as e:
+            if tiff_reader == "tifffile":
+                raise RuntimeError(f"tifffile not installed: {e}")
+            tiff = None
+        if tiff is not None:
+            # attempt simple imread first (single array)
+            try:
+                arr = tiff.imread(str(path), maxworkers=0)
+                _old_g = globals().get("TIFF_GAMMA", None)
+                _old_ev = globals().get("TIFF_EXPOSURE_EV", 0.0)
+                globals()["TIFF_GAMMA"] = tiff_gamma
+                globals()["TIFF_EXPOSURE_EV"] = tiff_exposure_ev
+                arr8 = _to_uint8_rgb(arr)
+                # restore
+                globals()["TIFF_GAMMA"] = _old_g
+                globals()["TIFF_EXPOSURE_EV"] = _old_ev
+                return Image.fromarray(arr8, mode="RGB")
+            except Exception:
+                pass
+
+            # manual pages walk as last resort
+            with tiff.TiffFile(str(path)) as tf:
+                pages = list(tf.pages)
+                if not pages:
+                    raise RuntimeError("Empty TIFF (no pages).")
+                # choose largest page by pixel count
+                page = max(pages, key=lambda p: (int(p.imagelength or 0) * int(p.imagewidth or 0)))
+                try:
+                    arr = page.asarray(maxworkers=0)
+                except Exception:
+                    # some very broken files: try memmap then copy
+                    arr = page.asarray(out='memmap')
+                    arr = np.array(arr, copy=True)
+            _old_g = globals().get("TIFF_GAMMA", None)
+            _old_ev = globals().get("TIFF_EXPOSURE_EV", 0.0)
+            globals()["TIFF_GAMMA"] = tiff_gamma
+            globals()["TIFF_EXPOSURE_EV"] = tiff_exposure_ev
+            arr8 = _to_uint8_rgb(arr)
+            globals()["TIFF_GAMMA"] = _old_g
+            globals()["TIFF_EXPOSURE_EV"] = _old_ev
+            return Image.fromarray(arr8, mode="RGB")
+
+    # If we got here, everything failed according to selection
+    raise RuntimeError("Failed to open TIFF with selected reader(s)")
 
 def _open_dng_with_rawpy_or_fallback(path: Path, demosaic_name: Optional[str]) -> tuple[Image.Image, dict]:
     """
@@ -214,7 +287,13 @@ def _open_dng_with_rawpy_or_fallback(path: Path, demosaic_name: Optional[str]) -
     """
     if not HAVE_RAWPY:
         # No rawpy: treat DNG as TIFF container
-        img = _open_tiff_robust(path)
+        img = _open_tiff_robust(
+            path,
+            tiff_apply_icc=False,
+            tiff_gamma=globals().get("TIFF_GAMMA", None),
+            tiff_exposure_ev=globals().get("TIFF_EXPOSURE_EV", 0.0),
+            tiff_reader=globals().get("TIFF_READER", "auto"),
+        )
         return img, {}
 
     try:
@@ -255,13 +334,23 @@ def _open_dng_with_rawpy_or_fallback(path: Path, demosaic_name: Optional[str]) -
                     raise
     except Exception:
         # linear/unsupported DNG -> treat as TIFF container
-        img = _open_tiff_robust(path)
+        img = _open_tiff_robust(
+            path,
+            tiff_apply_icc=False,
+            tiff_gamma=globals().get("TIFF_GAMMA", None),
+            tiff_exposure_ev=globals().get("TIFF_EXPOSURE_EV", 0.0),
+            tiff_reader=globals().get("TIFF_READER", "auto"),
+        )
         return img, {}
 
     img = Image.fromarray(rgb, mode="RGB")
     return img, {}
 
-def load_image_as_rgb(path: Path, demosaic_name: Optional[str] = None) -> Tuple[Image.Image, np.ndarray, Dict[str, Any]]:
+def load_image_as_rgb(path: Path, demosaic_name: Optional[str] = None,
+                      tiff_apply_icc: bool = False,
+                      tiff_gamma: Optional[float] = None,
+                      tiff_exposure_ev: float = 0.0,
+                      tiff_reader: str = "auto") -> Tuple[Image.Image, np.ndarray, Dict[str, Any]]:
     """
     Load image or RAW robustly.
     Return (PIL.Image RGB, np.array RGB, info dict for metadata passthrough).
@@ -276,7 +365,9 @@ def load_image_as_rgb(path: Path, demosaic_name: Optional[str] = None) -> Tuple[
 
     # TIFFs can be tricky: use robust opener
     if ext in {".tif", ".tiff"}:
-        img = _open_tiff_robust(path)
+        img = _open_tiff_robust(path, tiff_apply_icc=tiff_apply_icc,
+                                tiff_gamma=tiff_gamma, tiff_exposure_ev=tiff_exposure_ev,
+                                tiff_reader=tiff_reader)
         info = {"exif": getattr(img, "info", {}).get("exif"),
                 "icc_profile": getattr(img, "info", {}).get("icc_profile")}
         arr = np.array(img)
@@ -430,6 +521,10 @@ def process_one(
         flat_dedupe: bool,
         resume: bool,
         demosaic_name: Optional[str],
+        tiff_apply_icc: bool,
+        tiff_gamma: Optional[float],
+        tiff_exposure_ev: float,
+        tiff_reader: str,
 ) -> Optional[Dict[str, Any]]:
     src_path_p = Path(src_path)
     input_root_p = Path(input_root)
@@ -452,7 +547,14 @@ def process_one(
 
     # Load & encode
     try:
-        img, arr, info = load_image_as_rgb(src_path_p, demosaic_name=demosaic_name)
+        img, arr, info = load_image_as_rgb(
+            src_path_p,
+            demosaic_name=demosaic_name,
+            tiff_apply_icc=tiff_apply_icc,
+            tiff_gamma=tiff_gamma,
+            tiff_exposure_ev=tiff_exposure_ev,
+            tiff_reader=tiff_reader,
+        )
     except Exception as e:
         return {"error": f"{src_path_p}: {e}"}
 
@@ -535,6 +637,10 @@ def process_tree(
         allow_exts: Optional[Set[str]],
         demosaic_name: Optional[str],
         show_progress: bool,
+        tiff_apply_icc: bool,
+        tiff_gamma: Optional[float],
+        tiff_exposure_ev: float,
+        tiff_reader: str,
 ):
     out_root = input_root.parent / f"{input_root.name}_compressed"
     out_root.mkdir(parents=True, exist_ok=True)
@@ -590,6 +696,10 @@ def process_tree(
         flat_dedupe=flat_dedupe,
         resume=resume,
         demosaic_name=demosaic_name,
+        tiff_apply_icc=tiff_apply_icc,
+        tiff_gamma=tiff_gamma,
+        tiff_exposure_ev=tiff_exposure_ev,
+        tiff_reader=tiff_reader,
     )
 
     if workers <= 1:
@@ -676,6 +786,16 @@ def parse_args():
                    help="RAW demosaic algorithm (default: AHD). AMAZE needs GPL3 libraw; will fallback if unavailable.")
     p.add_argument("--no-progress", action="store_true",
                    help="Disable progress bar / ETA output.")
+    # New TIFF handling options
+    p.add_argument("--tiff-apply-icc", action="store_true",
+                   help="If TIFF has an embedded ICC profile, convert to sRGB using it (Pillow path only).")
+    p.add_argument("--tiff-gamma", type=float, default=None,
+                   help="Apply display gamma to linear TIFFs after 16→8 normalization (e.g., 2.2).")
+    p.add_argument("--tiff-exposure-ev", type=float, default=0.0,
+                   help="Exposure compensation in EV (applied before gamma; e.g., 1.0 doubles brightness).")
+    p.add_argument("--tiff-reader", type=str, choices=["auto", "pillow", "tifffile"], default="auto",
+                   help=("Which TIFF loader to use. 'auto' tries Pillow then falls back to tifffile. "
+                         "'tifffile' forces percentile smart16 path; 'pillow' uses ICC and EV/Gamma only."))
     return p.parse_args()
 
 # ----------------------------
@@ -705,6 +825,11 @@ if __name__ == "__main__":
 
     # --- TIFF smart16 per-channel toggle ---
     TIFF_SMART16_PERCHANNEL = bool(getattr(args, "tiff_smart16_perchannel", False)) or TIFF_SMART16_PERCHANNEL
+
+    # make these visible to _to_uint8_rgb
+    TIFF_GAMMA = args.tiff_gamma  # None or float (e.g., 2.2)
+    TIFF_EXPOSURE_EV = float(getattr(args, "tiff_exposure_ev", 0.0) or 0.0)
+    TIFF_READER = args.tiff_reader
 
     # --- Diagnostics ---
     print(f"exiftool detected: {'YES' if EXIFTOOL_OK else 'NO'}")
@@ -738,4 +863,8 @@ if __name__ == "__main__":
         allow_exts=ALLOW_EXTS,
         demosaic_name=args.demosaic,
         show_progress=(not args.no_progress),
+        tiff_apply_icc=args.tiff_apply_icc,
+        tiff_gamma=args.tiff_gamma,
+        tiff_exposure_ev=args.tiff_exposure_ev,
+        tiff_reader=args.tiff_reader,
     )
