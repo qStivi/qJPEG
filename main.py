@@ -23,8 +23,11 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import Optional, Tuple, Set, List, Dict, Any
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageFile
 from skimage.metrics import structural_similarity as ssim
+
+# Allow truncated reads for TIFF/JPEG
+ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 # Optional: better HEIC/HEIF support via Pillow plugin
 try:
@@ -66,6 +69,7 @@ DEFAULT_BRISQUE_RANGE = str(SCRIPT_DIR / "brisque_range_live.yml")
 # Smart 16-bit TIFF scaling controls (set from CLI at startup)
 TIFF_SMART16: bool = False
 TIFF_SMART16_PCTS: Tuple[float, float] = (0.5, 99.5)  # (low, high)
+
 
 def ensure_dir(path: Path):
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -126,7 +130,7 @@ def _to_uint8_rgb(arr: np.ndarray) -> np.ndarray:
     return np.repeat(arr8[..., None], 3, axis=-1)
 
 def _open_tiff_robust(path: Path) -> Image.Image:
-    """Try Pillow first; fall back to tifffile for tough TIFFs."""
+    """Try Pillow first; fall back to tifffile with safer reading for truncated/odd TIFFs."""
     # 1) Try Pillow
     try:
         with Image.open(path) as im:
@@ -134,52 +138,99 @@ def _open_tiff_robust(path: Path) -> Image.Image:
     except Exception:
         pass
 
-    # 2) Fallback to tifffile
+    # 2) tifffile fallback
     try:
-        import tifffile as tiff  # pip install tifffile
+        import tifffile as tiff
     except Exception as e:
         raise RuntimeError(f"Cannot open TIFF with Pillow and tifffile not installed: {e}")
 
+    # attempt simple imread first (single array)
+    try:
+        arr = tiff.imread(str(path), maxworkers=0)
+        arr8 = _to_uint8_rgb(arr)
+        return Image.fromarray(arr8, mode="RGB")
+    except Exception:
+        pass
+
+    # manual pages walk as last resort
     with tiff.TiffFile(str(path)) as tf:
         pages = list(tf.pages)
         if not pages:
             raise RuntimeError("Empty TIFF (no pages).")
         # choose largest page by pixel count
         page = max(pages, key=lambda p: (int(p.imagelength or 0) * int(p.imagewidth or 0)))
-        arr = page.asarray()
+        try:
+            arr = page.asarray(maxworkers=0)
+        except Exception:
+            # some very broken files: try memmap then copy
+            arr = page.asarray(out='memmap')
+            arr = np.array(arr, copy=True)
     arr8 = _to_uint8_rgb(arr)
     return Image.fromarray(arr8, mode="RGB")
 
-def _open_dng_with_rawpy(path: Path) -> Tuple[Image.Image, Dict[str, Any]]:
+def _open_dng_with_rawpy_or_fallback(path: Path, demosaic_name: Optional[str]) -> tuple[Image.Image, dict]:
+    """
+    Try rawpy with chosen demosaic; on errors (GPL3/unsupported/linear DNG), fallback to robust TIFF reader.
+    """
     if not HAVE_RAWPY:
-        raise RuntimeError("rawpy not installed; cannot open RAW files.")
-    with rawpy.imread(str(path)) as raw:
-        rgb = raw.postprocess(
-            use_camera_wb=True,            # avoid green/magenta tint
-            no_auto_bright=True,           # faithful brightness
-            output_bps=8,                  # 8-bit output for JPEG encoding
-            output_color=rawpy.ColorSpace.sRGB,
-            gamma=(2.222, 4.5),            # sRGB-like gamma
-            demosaic_algorithm=rawpy.DemosaicAlgorithm.AMAZE,
-            dcb_enhance=False,
-        )
-    img = Image.fromarray(rgb, mode="RGB")
-    info: Dict[str, Any] = {}
-    return img, info
+        # No rawpy: treat DNG as TIFF container
+        img = _open_tiff_robust(path)
+        return img, {}
 
-def load_image_as_rgb(path: Path) -> Tuple[Image.Image, np.ndarray, Dict[str, Any]]:
+    try:
+        import rawpy
+        with rawpy.imread(str(path)) as raw:
+            name = (demosaic_name or "AHD").upper()
+            # map string -> rawpy enum safely
+            algo = {
+                "AHD": rawpy.DemosaicAlgorithm.AHD,
+                "LINEAR": rawpy.DemosaicAlgorithm.LINEAR,
+                "AMAZE": getattr(rawpy.DemosaicAlgorithm, "AMAZE", rawpy.DemosaicAlgorithm.AHD),
+            }.get(name, rawpy.DemosaicAlgorithm.AHD)
+
+            try:
+                rgb = raw.postprocess(
+                    use_camera_wb=True,
+                    no_auto_bright=True,
+                    output_bps=8,
+                    output_color=rawpy.ColorSpace.sRGB,
+                    gamma=(2.222, 4.5),
+                    demosaic_algorithm=algo,
+                    dcb_enhance=False,
+                )
+            except Exception as e:
+                msg = str(e).lower()
+                if "gpl3" in msg or "not supported" in msg:
+                    # fall back to AHD if AMAZE is unavailable
+                    rgb = raw.postprocess(
+                        use_camera_wb=True,
+                        no_auto_bright=True,
+                        output_bps=8,
+                        output_color=rawpy.ColorSpace.sRGB,
+                        gamma=(2.222, 4.5),
+                        demosaic_algorithm=rawpy.DemosaicAlgorithm.AHD,
+                        dcb_enhance=False,
+                    )
+                else:
+                    raise
+    except Exception:
+        # linear/unsupported DNG -> treat as TIFF container
+        img = _open_tiff_robust(path)
+        return img, {}
+
+    img = Image.fromarray(rgb, mode="RGB")
+    return img, {}
+
+def load_image_as_rgb(path: Path, demosaic_name: Optional[str] = None) -> Tuple[Image.Image, np.ndarray, Dict[str, Any]]:
     """
     Load image or RAW robustly.
     Return (PIL.Image RGB, np.array RGB, info dict for metadata passthrough).
     """
     ext = path.suffix.lower()
 
-    # RAW (DNG & friends) -> rawpy with camera WB + sRGB
+    # RAW (DNG & friends) -> try rawpy, fallback to TIFF reader
     if ext in RAW_EXTS:
-        if ext == ".dng":
-            img, info = _open_dng_with_rawpy(path)
-        else:
-            img, info = _open_dng_with_rawpy(path)
+        img, info = _open_dng_with_rawpy_or_fallback(path, demosaic_name)
         arr = np.array(img)
         return img, arr, info
 
@@ -338,6 +389,7 @@ def process_one(
         mirror_structure: bool,
         flat_dedupe: bool,
         resume: bool,
+        demosaic_name: Optional[str],
 ) -> Optional[Dict[str, Any]]:
     src_path_p = Path(src_path)
     input_root_p = Path(input_root)
@@ -360,7 +412,7 @@ def process_one(
 
     # Load & encode
     try:
-        img, arr, info = load_image_as_rgb(src_path_p)
+        img, arr, info = load_image_as_rgb(src_path_p, demosaic_name=demosaic_name)
     except Exception as e:
         return {"error": f"{src_path_p}: {e}"}
 
@@ -441,6 +493,7 @@ def process_tree(
         workers: int,
         no_brisque: bool,
         allow_exts: Optional[Set[str]],
+        demosaic_name: Optional[str],
 ):
     out_root = input_root.parent / f"{input_root.name}_compressed"
     out_root.mkdir(parents=True, exist_ok=True)
@@ -476,6 +529,7 @@ def process_tree(
         mirror_structure=mirror_structure,
         flat_dedupe=flat_dedupe,
         resume=resume,
+        demosaic_name=demosaic_name,
     )
 
     if workers <= 1:
@@ -488,7 +542,8 @@ def process_tree(
             elif res:
                 print(f"[OK] {res['src']} -> {res['dst']}  "
                       f"quality={res['quality']}, SSIM={res['ssim']:.4f}"
-                      + (f", BRISQUE={res['brisque']:.2f}" if res['brisque'] is not None else ""))
+                      + (f", BRISQUE={res['brisque']:.2f}" if res['brisque'] is not None else "")
+                      + (f" | saved {res['saved_pct']:.1f}%" if 'saved_pct' in res and res['saved_pct'] is not None else ""))
             results.append(res)
     else:
         with ProcessPoolExecutor(max_workers=workers) as ex:
@@ -502,7 +557,8 @@ def process_tree(
                 elif res:
                     print(f"[OK] {res['src']} -> {res['dst']}  "
                           f"quality={res['quality']}, SSIM={res['ssim']:.4f}"
-                          + (f", BRISQUE={res['brisque']:.2f}" if res['brisque'] is not None else ""))
+                          + (f", BRISQUE={res['brisque']:.2f}" if res['brisque'] is not None else "")
+                          + (f" | saved {res['saved_pct']:.1f}%" if 'saved_pct' in res and res['saved_pct'] is not None else ""))
                 results.append(res)
 
     # Summary
@@ -547,6 +603,9 @@ def parse_args():
                    help="Enable smart 16-bit TIFF scaling (percentile stretch to 8-bit).")
     p.add_argument("--tiff-smart16-pct", type=str, default="0.5,99.5",
                    help="Low,High percentiles for smart 16-bit scaling (default: '0.5,99.5').")
+    p.add_argument("--demosaic", type=str, default="AHD",
+                   choices=["AHD", "LINEAR", "AMAZE"],
+                   help="RAW demosaic algorithm (default: AHD). AMAZE needs GPL3 libraw; will fallback if unavailable.")
     return p.parse_args()
 
 # ----------------------------
@@ -573,6 +632,7 @@ if __name__ == "__main__":
         TIFF_SMART16_PCTS = (float(lo_s), float(hi_s))
     except Exception:
         TIFF_SMART16_PCTS = (0.5, 99.5)
+
 
     # --- Diagnostics ---
     print(f"exiftool detected: {'YES' if EXIFTOOL_OK else 'NO'}")
@@ -604,4 +664,5 @@ if __name__ == "__main__":
         workers=max(1, args.workers),
         no_brisque=args.no_brisque,
         allow_exts=ALLOW_EXTS,
+        demosaic_name=args.demosaic,
     )
