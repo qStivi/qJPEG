@@ -143,8 +143,10 @@ class MapStats:
 
 def _percentile_stretch(arrf: np.ndarray, lo: float, hi: float, per_channel: bool) -> tuple[np.ndarray, list | float, list | float]:
     """Return arr01 in [0,1] and the lo/hi values used (per-channel or global)."""
+    ds = int(globals().get("SMART16_DOWNSAMPLE", 1))
+    a = arrf[::ds, ::ds] if arrf.ndim == 2 else arrf[::ds, ::ds, :]
     if arrf.ndim == 2:  # grayscale
-        lo_v, hi_v = np.nanpercentile(arrf, (lo, hi))
+        lo_v, hi_v = np.nanpercentile(a, (lo, hi))
         if hi_v <= lo_v:
             arr01 = np.clip(arrf, 0.0, 1.0)
         else:
@@ -158,7 +160,7 @@ def _percentile_stretch(arrf: np.ndarray, lo: float, hi: float, per_channel: boo
     if per_channel:
         lo_vals, hi_vals = [], []
         for ch in range(c):
-            lo_v, hi_v = np.nanpercentile(arrf[..., ch], (lo, hi))
+            lo_v, hi_v = np.nanpercentile(a[..., ch], (lo, hi))
             lo_vals.append(float(lo_v)); hi_vals.append(float(hi_v))
             if hi_v <= lo_v:
                 out[..., ch] = np.clip(arrf[..., ch], 0.0, 1.0)
@@ -169,7 +171,7 @@ def _percentile_stretch(arrf: np.ndarray, lo: float, hi: float, per_channel: boo
             out[..., ch] = out[..., c-1]
         return out, lo_vals, hi_vals
     else:
-        lo_v, hi_v = np.nanpercentile(arrf[..., :c], (lo, hi))
+        lo_v, hi_v = np.nanpercentile(a[..., :c], (lo, hi))
         if hi_v <= lo_v:
             out[..., :c] = np.clip(arrf[..., :c], 0.0, 1.0)
         else:
@@ -200,6 +202,15 @@ def _lin_luma(a: np.ndarray) -> np.ndarray:
 
 def _subsample(arr: np.ndarray, step: int) -> np.ndarray:
     return arr[::step, ::step, :] if arr.ndim == 3 else arr[::step, ::step]
+
+
+def _downsample_arr(a: np.ndarray, step: int) -> np.ndarray:
+    return a[::step, ::step] if step > 1 else a
+
+
+def _rgb_to_luma8(a: np.ndarray) -> np.ndarray:
+    # expects uint8 RGB
+    return (0.2126*a[...,0] + 0.7152*a[...,1] + 0.0722*a[...,2]).astype(np.uint8)
 
 
 def _bisect_ev(f, target: float, lo: float, hi: float, iters: int) -> float:
@@ -314,7 +325,7 @@ def _to_uint8_rgb(arr: np.ndarray, dbg: MapStats | None = None) -> np.ndarray:
     gamma = globals().get("TIFF_GAMMA", None)
     tonemap_mode = globals().get("TIFF_FLOAT_TONEMAP", "none")
     use_smart = bool(globals().get("TIFF_SMART16", False))
-    per_channel = bool(globals().get("TIFF_SMART16_PERCHANNEL", True))
+    per_channel = bool(globals().get("TIFF_SMART16_PERCHANNEL", False))
     lo, hi = globals().get("TIFF_SMART16_PCTS", (0.5, 99.5))
     auto_mid = globals().get("AUTO_EV_MID", None)
     auto_pct = float(globals().get("AUTO_EV_PCT", 50.0))
@@ -386,7 +397,7 @@ def _to_uint8_rgb(arr: np.ndarray, dbg: MapStats | None = None) -> np.ndarray:
             dbg.src_min = float(arrf.min()); dbg.src_max = float(arrf.max())
             dbg.p_lo = lo; dbg.p_hi = hi; dbg.per_channel = per_channel
             dbg.src_lo_val = lo_v; dbg.src_hi_val = hi_v
-            dbg.ev_applied = ev; dbg.gamma_applied = gamma; dbg.tonemap = "none"
+            dbg.ev_applied = ev; dbg.gamma_applied = gamma; dbg.tonemap = tonemap_mode
             dbg.__dict__.update(linY_p50_pre=float(np.nanpercentile(_lin_luma(arr01),50)),
                                 linY_p50_post=float(np.nanpercentile(_lin_luma(arr_tm),50)))
         return _finish(arr_disp)
@@ -664,24 +675,35 @@ def ssim_threshold_search(
         progressive: bool = False,
         subsampling: Optional[int] = None,
 ) -> Tuple[int, float]:
-    """Binary search the lowest JPEG quality with SSIM >= threshold. Returns (quality, ssim_val)."""
+    """Binary search the lowest JPEG quality with SSIM >= threshold. Faster via downsample/luma."""
+    # Prepare reference (possibly downsampled / luma)
+    ds = int(globals().get("SSIM_DOWNSAMPLE", 1))
+    luma_only = bool(globals().get("SSIM_LUMA_ONLY", False))
+    ref = _downsample_arr(src_arr, ds)
+    if luma_only:
+        ref = _rgb_to_luma8(ref)
+        ref_range = 255
+        ref_kwargs = {}
+    else:
+        ref_range = 255
+        ref_kwargs = dict(channel_axis=2)
+
     lo, hi = qmin, qmax
-    best_q = qmax
-    best_ssim = 1.0
+    best_q, best_ssim = qmax, 1.0
     while lo <= hi:
         mid = (lo + hi) // 2
         buf = io.BytesIO()
-        save_kwargs = dict(format="JPEG", quality=mid, optimize=True)
-        if progressive:
-            save_kwargs["progressive"] = True
-        if subsampling is not None:
-            # subsampling=0 -> 4:4:4, 1 -> 4:2:2, 2 -> 4:2:0 (Pillow)
-            save_kwargs["subsampling"] = subsampling
+        save_kwargs = dict(format="JPEG", quality=mid, optimize=bool(globals().get("SEARCH_OPTIMIZE", False)))
+        if progressive: save_kwargs["progressive"] = True
+        if subsampling is not None: save_kwargs["subsampling"] = subsampling
         src_img.save(buf, **save_kwargs)
         buf.seek(0)
-        comp = Image.open(buf)
+        comp = Image.open(buf).convert("RGB")
         comp_arr = np.array(comp)
-        val = ssim(src_arr, comp_arr, data_range=255, channel_axis=2)
+        comp_arr = _downsample_arr(comp_arr, ds)
+        if luma_only:
+            comp_arr = _rgb_to_luma8(comp_arr)
+        val = ssim(ref, comp_arr, data_range=ref_range, **ref_kwargs)
         if val >= threshold:
             best_q, best_ssim = mid, val
             hi = mid - 1
@@ -794,6 +816,7 @@ def process_one(
         tiff_gamma: Optional[float],
         tiff_exposure_ev: float,
         tiff_reader: str,
+        exiftool_mode: str,
         debug: bool,
         debug_json: bool,
 ) -> Optional[Dict[str, Any]]:
@@ -834,7 +857,8 @@ def process_one(
         progressive=progressive, subsampling=subsampling
     )
     save_final_jpeg(dst_path, img, q, info, progressive=progressive, subsampling=subsampling)
-    copy_all_metadata_with_exiftool(src_path_p, dst_path)
+    if exiftool_mode == "all":
+        copy_all_metadata_with_exiftool(src_path_p, dst_path)
 
     # Optional BRISQUE report
     bq = None
@@ -934,6 +958,7 @@ def process_tree(
         tiff_gamma: Optional[float],
         tiff_exposure_ev: float,
         tiff_reader: str,
+        exiftool_mode: str,
         debug: bool,
         debug_json: bool,
 ):
@@ -995,6 +1020,7 @@ def process_tree(
         tiff_gamma=tiff_gamma,
         tiff_exposure_ev=tiff_exposure_ev,
         tiff_reader=tiff_reader,
+        exiftool_mode=exiftool_mode,
         debug=debug,
         debug_json=debug_json,
     )
@@ -1106,11 +1132,20 @@ def parse_args():
     p.add_argument("--progressive", action="store_true", help="Save progressive JPEGs.")
     p.add_argument("--subsampling", type=int, choices=[0, 1, 2], default=None,
                    help="Force chroma subsampling: 0=4:4:4, 1=4:2:2, 2=4:2:0. Default: Pillow decides.")
+    # SSIM/search speedups
+    p.add_argument("--ssim-downsample", type=int, default=4,
+                   help="Compute SSIM on a 1/N grid (e.g., 4 → img[::4,::4]). 1 disables downsampling.")
+    p.add_argument("--ssim-luma-only", action="store_true",
+                   help="Compute SSIM on luma only (Y), faster and usually sufficient.")
+    p.add_argument("--search-optimize", action="store_true",
+                   help="Use Pillow optimize=True during quality search (slower). Default: off.")
     p.add_argument("--brisque-model", type=str, default=os.environ.get("BRISQUE_MODEL", DEFAULT_BRISQUE_MODEL),
                    help="Path to BRISQUE_model_live.yml")
     p.add_argument("--brisque-range", type=str, default=os.environ.get("BRISQUE_RANGE", DEFAULT_BRISQUE_RANGE),
                    help="Path to BRISQUE_range_live.yml")
     p.add_argument("--no-brisque", action="store_true", help="Disable BRISQUE scoring to speed up.")
+    p.add_argument("--exiftool-mode", type=str, choices=["all","none"], default="all",
+                   help="Copy metadata with exiftool after save. 'none' skips the external call (faster).")
     p.add_argument("--resume", action="store_true", help="Skip files whose outputs already exist and are up-to-date.")
     p.add_argument("--workers", type=int, default=max(1, (os.cpu_count() or 2)//2),
                    help="Parallel workers (default: half your CPUs).")
@@ -1122,6 +1157,8 @@ def parse_args():
                    help="Low,High percentiles for smart 16-bit scaling (default: '0.5,99.5').")
     p.add_argument("--tiff-smart16-perchannel", action="store_true",
                    help="With --tiff-smart16, stretch each RGB channel independently (more punch, may shift color slightly). If omitted, uses a single global curve for all channels (safer colors).")
+    p.add_argument("--smart16-downsample", type=int, default=8,
+                   help="Subsample step for percentile stretch (e.g., 8 → use every 8th pixel).")
     p.add_argument("--demosaic", type=str, default="AHD",
                    choices=["AHD", "LINEAR", "AMAZE"],
                    help="RAW demosaic algorithm (default: AHD). AMAZE needs GPL3 libraw; will fallback if unavailable.")
@@ -1199,7 +1236,13 @@ if __name__ == "__main__":
         TIFF_SMART16_PCTS = (0.5, 99.5)
 
     # --- TIFF smart16 per-channel toggle ---
-    TIFF_SMART16_PERCHANNEL = bool(getattr(args, "tiff_smart16_perchannel", False)) or TIFF_SMART16_PERCHANNEL
+    TIFF_SMART16_PERCHANNEL = bool(getattr(args, "tiff_smart16_perchannel", False))
+    SMART16_DOWNSAMPLE = max(1, int(getattr(args, "smart16_downsample", 8)))
+
+    # Search/SSIM globals
+    SSIM_DOWNSAMPLE = max(1, int(getattr(args, "ssim_downsample", 1)))
+    SSIM_LUMA_ONLY = bool(getattr(args, "ssim_luma_only", False))
+    SEARCH_OPTIMIZE = bool(getattr(args, "search_optimize", False))
 
     # make these visible to _to_uint8_rgb
     TIFF_GAMMA = args.tiff_gamma  # None or float (e.g., 2.2)
@@ -1226,6 +1269,11 @@ if __name__ == "__main__":
     # Post-gamma shaping globals
     BLACKPOINT_PCT = args.blackpoint_pct
     WHITEPOINT_PCT = args.whitepoint_pct
+    # Safety net: if user didn't pass either, enable sensible defaults to avoid the gray veil
+    if BLACKPOINT_PCT is None and WHITEPOINT_PCT is None:
+        BLACKPOINT_PCT = 0.6
+        WHITEPOINT_PCT = 99.7
+        print("[INFO] Enabled default post-gamma anchoring: blackpoint 0.6 / whitepoint 99.7 to prevent gray veil.\n       Override with --blackpoint-pct/--whitepoint-pct or set either to disable.")
     CONTRAST_STRENGTH = args.contrast
     SATURATION = args.saturation
 
@@ -1266,6 +1314,7 @@ if __name__ == "__main__":
             tiff_gamma=args.tiff_gamma,
             tiff_exposure_ev=args.tiff_exposure_ev,
             tiff_reader=args.tiff_reader,
+            exiftool_mode=args.exiftool_mode,
             debug=args.debug,
             debug_json=args.debug_json,
         )
