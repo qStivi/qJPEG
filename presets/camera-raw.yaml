@@ -25,8 +25,8 @@ auto_ev_hi_cap: 0.88         # More aggressive highlight protection
 auto_ev_downsample: 8
 
 # Post-gamma shaping
-blackpoint_pct: 0.3
-whitepoint_pct: 99.8
+blackpoint_pct: 2.5   # Higher for float images
+whitepoint_pct: 97.5  # Lower for float images
 shadows: 0.12
 contrast: 0.08
 saturation: 1.08

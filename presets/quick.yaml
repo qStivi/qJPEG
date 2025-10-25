@@ -25,8 +25,8 @@ auto_ev_hi_cap: 0.90
 auto_ev_downsample: 16       # Very coarse for speed
 
 # Post-gamma shaping
-blackpoint_pct: 0.2
-whitepoint_pct: 99.7
+blackpoint_pct: 2.0
+whitepoint_pct: 98.0
 shadows: 0.15
 contrast: 0.06
 saturation: 1.06
