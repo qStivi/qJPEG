@@ -40,4 +40,4 @@ ssim_luma_only: true
 no_brisque: true
 exiftool_mode: none
 workers: 8
-resume: true
+resume: false
