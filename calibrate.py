@@ -64,13 +64,13 @@ PARAM_ADJUSTMENTS = {
         "saturation_good": 0.0,
     },
     "blackpoint_pct": {
-        "too_washed": +0.1,
-        "too_crushed": -0.1,
+        "too_washed": +1.0,        # Meaningful step for percentile (was 0.1, way too small!)
+        "too_crushed": -1.0,
         "blacks_good": 0.0,
     },
     "whitepoint_pct": {
-        "too_washed": -0.1,
-        "highlights_clipped": +0.1,
+        "too_washed": -1.0,        # Meaningful step for percentile
+        "highlights_clipped": +1.0,
         "whites_good": 0.0,
     }
 }
@@ -136,8 +136,8 @@ class Calibrator:
             "auto_ev_hi_pct": 98.0,
             "auto_ev_hi_cap": 0.90,
             "auto_ev_downsample": 4,
-            "blackpoint_pct": 0.2,
-            "whitepoint_pct": 99.7,
+            "blackpoint_pct": 2.0,   # For 32-bit float images
+            "whitepoint_pct": 98.0,  # For 32-bit float images
             "shadows": 0.15,
             "contrast": 0.06,
             "saturation": 1.06,

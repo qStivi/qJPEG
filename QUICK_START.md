@@ -27,6 +27,7 @@ python main.py "/path/to/photos" --config hdr-default --shadows 0.20 --contrast 
 ```
 
 **Available presets:**
+- `float32.yaml` - **RECOMMENDED for 32-bit float TIFFs** - Aggressive black/white point clipping
 - `hdr-default.yaml` - Balanced HDR→SDR conversion with highlight protection
 - `camera-raw.yaml` - Conservative settings for camera RAW files
 - `quick.yaml` - Fast processing for testing/iteration
@@ -75,6 +76,35 @@ python calibrate.py "/path/to/photos" --quick --output quick-test.yaml
 
 # Limit iterations
 python calibrate.py "/path/to/photos" --max-iterations 3
+```
+
+## 32-bit Float TIFF Images (IMPORTANT!)
+
+If your images are **32-bit float** (not 16-bit), the gray veil issue requires **more aggressive** black/white point clipping:
+
+**Why:** 32-bit float images after tone mapping often occupy a narrow range like [0.03, 0.93] instead of [0.0, 1.0]. Using very low percentiles like `0.2%` picks values too close to the min/max, so the remapping doesn't stretch enough.
+
+**Solution:** Use **higher percentiles** to actually clip and stretch:
+
+```bash
+# Use the float32 preset (recommended)
+python main.py "/path/to/32bit-float" --config float32
+
+# Or manually specify aggressive clipping
+python main.py "/path/to/32bit-float" --config hdr-default \
+  --blackpoint-pct 3.0 --whitepoint-pct 97.0 --shadows 0.20
+```
+
+**Rule of thumb:**
+- **16-bit images:** `blackpoint-pct 0.2-0.5`, `whitepoint-pct 99.5-99.8`
+- **32-bit float:** `blackpoint-pct 2.0-5.0`, `whitepoint-pct 95.0-98.0`
+
+**Check your image type:**
+```python
+import tifffile
+with tifffile.TiffFile("your_image.tif") as tf:
+    print(f"Bits: {tf.pages[0].bitspersample}")
+    print(f"Format: {tf.pages[0].sampleformat}")  # 1=uint, 3=float
 ```
 
 ## Common Use Cases

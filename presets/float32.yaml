@@ -1,6 +1,6 @@
-# HDR Default Preset
-# Optimized for high-bit-depth TIFF/RAW with HDR content
-# Balances exposure with highlight protection
+# Float32 Preset
+# Optimized specifically for 32-bit float TIFF images
+# More aggressive black/white point clipping to eliminate gray veil
 
 # Input/Output
 types: tif,tiff
@@ -24,12 +24,12 @@ auto_ev_hi_pct: 98.0
 auto_ev_hi_cap: 0.90
 auto_ev_downsample: 4
 
-# Post-gamma shaping
-blackpoint_pct: 2.0   # For 32-bit float: 2-5% works better than 0.2%
-whitepoint_pct: 98.0  # Clip top 2% to eliminate gray veil
-shadows: 0.15         # Lift dark subjects
-contrast: 0.06
-saturation: 1.06
+# Post-gamma shaping (AGGRESSIVE for float32)
+blackpoint_pct: 3.0   # Clip bottom 3% - eliminates gray blacks
+whitepoint_pct: 97.0  # Clip top 3% - eliminates gray whites
+shadows: 0.20         # Extra shadow lift for float images
+contrast: 0.08        # Slightly more contrast
+saturation: 1.08      # Slightly more saturation
 
 # SSIM quality search
 ssim: 0.99
