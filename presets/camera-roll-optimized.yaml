@@ -22,5 +22,5 @@ ssim_downsample: 4
 ssim_luma_only: true
 no_brisque: true
 exiftool_mode: all
-workers: 4
+workers: 8
 resume: true
