@@ -38,7 +38,7 @@ ssim_luma_only: true
 
 # Performance (maximize speed)
 no_brisque: true
-exiftool_mode: none
+exiftool_mode: all     # Preserve ALL metadata (EXIF, GPS, camera info, dates, etc.)
 search_optimize: false        # Skip Pillow optimize during search
 workers: 16
 resume: false
