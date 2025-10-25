@@ -3,6 +3,26 @@
 ## Overview
 **qJPEG** is a perceptually‑aware batch optimizer that (a) finds the lowest JPEG quality meeting a user target **SSIM**, and (b) safely converts high‑bit‑depth TIFF/RAW/HDR sources to good‑looking SDR JPEGs while preserving metadata. It scales to entire libraries (mirrored or flat output), is resilient to odd files, and runs fast with multiprocessing.
 
+## NEW: Simplified Workflow (v2.0)
+**No more 20+ parameter commands!** Use the new features:
+
+1. **Config File System** - Use presets instead of long command lines:
+   ```bash
+   python main.py "/path/to/photos" --config hdr-default
+   ```
+
+2. **Interactive Calibration** - Automatically find optimal settings:
+   ```bash
+   python calibrate.py "/path/to/photos" --output my-settings.yaml
+   ```
+
+3. **Shadow Lift** - Brighten dark subjects without blowing highlights:
+   ```bash
+   python main.py "/path/to/photos" --config hdr-default --shadows 0.20
+   ```
+
+**[→ See QUICK_START.md for the simple guide](QUICK_START.md)**
+
 ---
 
 ## What’s new in this revision

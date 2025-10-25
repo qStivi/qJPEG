@@ -24,6 +24,12 @@ from typing import Optional, Tuple, Set, List, Dict, Any
 import json
 from dataclasses import dataclass
 
+try:
+    import yaml
+    HAVE_YAML = True
+except ImportError:
+    HAVE_YAML = False
+
 import numpy as np
 from PIL import Image, ImageFile
 try:
@@ -286,6 +292,18 @@ def _apply_post_gamma_shaping(arr_disp: np.ndarray, dbg=None) -> np.ndarray:
             arr_disp = np.clip((arr_disp - bval) / (wval - bval), 0.0, 1.0)
         if dbg is not None:
             dbg.__dict__.update(bp_pct=bp, wp_pct=wp, bp_val=bval, wp_val=wval)
+
+    # Shadow lift (brightens dark areas without affecting highlights)
+    shadow_lift = float(globals().get("SHADOW_LIFT", 0.0) or 0.0)
+    if abs(shadow_lift) > 1e-6:
+        Y = _lin_luma(arr_disp)
+        # Smooth mask: strong in shadows, fades to zero in highlights
+        # Using (1-Y)^2 gives a smooth quadratic falloff
+        mask = np.power(np.clip(1.0 - Y, 0.0, 1.0), 2.0)
+        # Add lift proportional to how dark the pixel is
+        arr_disp = np.clip(arr_disp + shadow_lift * mask[..., None], 0.0, 1.0)
+        if dbg is not None:
+            dbg.__dict__.update(shadow_lift=shadow_lift)
 
     # Contrast S-curve (sigmoid around 0.5)
     c = float(globals().get("CONTRAST_STRENGTH", 0.0) or 0.0)
@@ -1116,6 +1134,62 @@ def _play_finish_sound():
         pass
 
 # ----------------------------
+# Config file support
+# ----------------------------
+def load_config(config_path: str) -> Dict[str, Any]:
+    """Load YAML config file and return dict of settings."""
+    if not HAVE_YAML:
+        print("[WARNING] PyYAML not installed. Config files require: pip install pyyaml")
+        return {}
+
+    p = Path(config_path)
+    if not p.exists():
+        # Try looking in presets/ directory
+        preset_path = SCRIPT_DIR / "presets" / config_path
+        if not preset_path.exists():
+            preset_path = SCRIPT_DIR / "presets" / f"{config_path}.yaml"
+        if preset_path.exists():
+            p = preset_path
+        else:
+            print(f"[WARNING] Config file not found: {config_path}")
+            return {}
+
+    try:
+        with open(p, 'r') as f:
+            config = yaml.safe_load(f)
+        print(f"[CONFIG] Loaded: {p}")
+        return config if config else {}
+    except Exception as e:
+        print(f"[WARNING] Failed to load config {p}: {e}")
+        return {}
+
+def save_config(config_path: str, args: argparse.Namespace):
+    """Save current args to a YAML config file."""
+    if not HAVE_YAML:
+        print("[ERROR] PyYAML not installed. Cannot save config.")
+        return
+
+    # Convert args to dict, excluding None values and input_root
+    config = {}
+    for key, value in vars(args).items():
+        if key == 'input_root' or key == 'config' or key == 'save_config':
+            continue
+        if value is not None and value != argparse.SUPPRESS:
+            # Skip default values for cleaner config
+            if key in ['qmin', 'qmax'] and value in [1, 100]:
+                continue
+            config[key] = value
+
+    try:
+        p = Path(config_path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with open(p, 'w') as f:
+            yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+        print(f"[CONFIG] Saved to: {p}")
+    except Exception as e:
+        print(f"[ERROR] Failed to save config: {e}")
+
+# ----------------------------
 # CLI
 # ----------------------------
 def parse_args():
@@ -1204,11 +1278,55 @@ def parse_args():
                    help="After gamma, map this luminance percentile to 0 (e.g., 0.2).")
     p.add_argument("--whitepoint-pct", type=float, default=None,
                    help="After gamma, map this luminance percentile to 1 (e.g., 99.7).")
+    p.add_argument("--shadows", type=float, default=0.0,
+                   help="Shadow lift amount (0=no change, 0.1–0.3 brightens dark areas without affecting highlights).")
     p.add_argument("--contrast", type=float, default=0.0,
                    help="Post-gamma S-curve strength (0=no change, try 0.08–0.20).")
     p.add_argument("--saturation", type=float, default=1.0,
                    help="Post-gamma saturation multiplier (1=no change, e.g., 1.05).")
-    return p.parse_args()
+    # Config file support
+    p.add_argument("--config", type=str, default=None,
+                   help="Load settings from YAML config file. Can be a path or preset name (e.g., 'hdr-default').")
+    p.add_argument("--save-config", type=str, default=None,
+                   help="Save current settings to YAML config file and exit.")
+
+    # Two-pass parsing: load config first, then override with CLI args
+    # First pass: parse to check for --config
+    args_temp, _ = p.parse_known_args()
+
+    # Load config if specified
+    config_dict = {}
+    if args_temp.config:
+        config_dict = load_config(args_temp.config)
+
+    # Apply config as defaults
+    if config_dict:
+        # Convert config values to argparse defaults
+        for key, value in config_dict.items():
+            # Handle special cases
+            if key == 'tiff_smart16_pct' and isinstance(value, list):
+                config_dict[key] = f"{value[0]},{value[1]}"
+            elif key == 'auto_ev_bounds' and isinstance(value, list):
+                config_dict[key] = f"{value[0]},{value[1]}"
+
+        # Set defaults from config
+        for action in p._actions:
+            if action.dest in config_dict and action.dest != 'config':
+                # Convert underscores to match config keys
+                config_key = action.dest.replace('_', '_')
+                if config_key in config_dict:
+                    action.default = config_dict[config_key]
+
+    # Second pass: parse all args (CLI args override config)
+    args = p.parse_args()
+
+    # Handle save-config
+    if args.save_config:
+        save_config(args.save_config, args)
+        import sys
+        sys.exit(0)
+
+    return args
 
 # ----------------------------
 # Main
@@ -1274,6 +1392,7 @@ if __name__ == "__main__":
         BLACKPOINT_PCT = 0.6
         WHITEPOINT_PCT = 99.7
         print("[INFO] Enabled default post-gamma anchoring: blackpoint 0.6 / whitepoint 99.7 to prevent gray veil.\n       Override with --blackpoint-pct/--whitepoint-pct or set either to disable.")
+    SHADOW_LIFT = args.shadows
     CONTRAST_STRENGTH = args.contrast
     SATURATION = args.saturation
 

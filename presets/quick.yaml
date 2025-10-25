@@ -1,0 +1,45 @@
+# Quick Preset
+# Fast processing for testing and iteration
+# Trades quality for speed
+
+# Input/Output
+types: tif,tiff
+tiff_reader: tifffile
+
+# Smart16 (aggressive downsampling)
+tiff_smart16: true
+tiff_smart16_pct: [0.5, 99.0]
+tiff_smart16_perchannel: true
+smart16_downsample: 8        # Faster percentile computation
+
+# Tone mapping pipeline
+tiff_float_tonemap: aces
+tiff_gamma: 2.2
+
+# Auto-exposure (coarse)
+auto_ev_mode: mid_guard
+auto_ev_mid: 0.18
+auto_ev_mid_pct: 50
+auto_ev_hi_pct: 98.0
+auto_ev_hi_cap: 0.90
+auto_ev_downsample: 16       # Very coarse for speed
+
+# Post-gamma shaping
+blackpoint_pct: 0.2
+whitepoint_pct: 99.7
+shadows: 0.15
+contrast: 0.06
+saturation: 1.06
+
+# SSIM quality search (faster)
+ssim: 0.97                   # Lower quality = faster
+ssim_downsample: 8           # Aggressive downsampling
+ssim_luma_only: true
+
+# Performance (maximize speed)
+no_brisque: true
+exiftool_mode: none
+search_optimize: false        # Skip Pillow optimize during search
+workers: 16
+resume: true
+no_progress: false
