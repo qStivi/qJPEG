@@ -187,17 +187,31 @@ def verify_metadata(src_path: Path, dst_path: Path,
 
 def verify_icc_profile(src_path: Path, dst_path: Path) -> bool:
     """
-    Verify ICC profile is present in destination JPEG.
-    Only checks the destination file (source TIFFs may not be readable by Pillow).
+    Verify ICC profile was preserved if present in source.
+
+    Uses exiftool to check source (handles 32-bit float TIFFs) and
+    Pillow to verify destination JPEG has embedded profile.
+
+    ICC profiles contain color space information that maps device-specific
+    colors to a device-independent color space (like sRGB, Adobe RGB, etc).
     """
     try:
         from PIL import Image
 
-        # Only check destination JPEG - source TIFFs may be 32-bit float which Pillow can't handle
+        # Check if source has ICC profile using exiftool (works with 32-bit float TIFFs)
+        src_meta = extract_metadata_exiftool(src_path)
+        src_has_profile = bool(src_meta.get('ICC_Profile:ProfileDescription') or
+                               src_meta.get('ProfileDescription'))
+
+        # If source doesn't have ICC profile, it's OK for destination not to have one
+        if not src_has_profile:
+            return True
+
+        # Source has ICC, verify destination has it too
         dst_img = Image.open(dst_path)
         dst_icc = dst_img.info.get('icc_profile')
 
-        # Verify destination has an ICC profile embedded
+        # Destination must have an ICC profile embedded
         if not dst_icc or len(dst_icc) == 0:
             return False
 
