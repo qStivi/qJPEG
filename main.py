@@ -95,6 +95,21 @@ TIFF_GAMMA: Optional[float] = None
 TIFF_EXPOSURE_EV: float = 0.0
 
 
+# Worker process initializer - sets globals for multiprocessing
+def _init_worker_globals(settings_dict):
+    """Initialize global variables in worker processes."""
+    global TIFF_SMART16, TIFF_SMART16_PCTS, TIFF_SMART16_PERCHANNEL
+    global SMART16_DOWNSAMPLE, SSIM_DOWNSAMPLE, SSIM_LUMA_ONLY, SEARCH_OPTIMIZE
+    global TIFF_GAMMA, TIFF_EXPOSURE_EV, TIFF_FLOAT_TONEMAP
+    global AUTO_EV_MODE, AUTO_EV_MID, AUTO_EV_MID_PCT, AUTO_EV_HI_PCT, AUTO_EV_HI_CAP
+    global AUTO_EV_DOWNSAMPLE, AUTO_EV_BOUNDS, AUTO_EV_ITERS
+    global BLACKPOINT_PCT, WHITEPOINT_PCT, SHADOW_LIFT, CONTRAST_STRENGTH, SATURATION
+
+    for key, value in settings_dict.items():
+        globals()[key] = value
+
+
+
 def ensure_dir(path: Path):
     path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -1058,7 +1073,36 @@ def process_tree(
             _tick()
             results.append(res)
     else:
-        with ProcessPoolExecutor(max_workers=workers) as ex:
+        # Collect global settings to pass to worker processes
+        import functools
+        settings_dict = {
+            "TIFF_SMART16": globals().get("TIFF_SMART16", False),
+            "TIFF_SMART16_PCTS": globals().get("TIFF_SMART16_PCTS", (0.5, 99.5)),
+            "TIFF_SMART16_PERCHANNEL": globals().get("TIFF_SMART16_PERCHANNEL", False),
+            "SMART16_DOWNSAMPLE": globals().get("SMART16_DOWNSAMPLE", 1),
+            "SSIM_DOWNSAMPLE": globals().get("SSIM_DOWNSAMPLE", 1),
+            "SSIM_LUMA_ONLY": globals().get("SSIM_LUMA_ONLY", False),
+            "SEARCH_OPTIMIZE": globals().get("SEARCH_OPTIMIZE", False),
+            "TIFF_GAMMA": globals().get("TIFF_GAMMA", None),
+            "TIFF_EXPOSURE_EV": globals().get("TIFF_EXPOSURE_EV", 0.0),
+            "TIFF_FLOAT_TONEMAP": globals().get("TIFF_FLOAT_TONEMAP", "none"),
+            "AUTO_EV_MODE": globals().get("AUTO_EV_MODE", "off"),
+            "AUTO_EV_MID": globals().get("AUTO_EV_MID", 0.18),
+            "AUTO_EV_MID_PCT": globals().get("AUTO_EV_MID_PCT", 50.0),
+            "AUTO_EV_HI_PCT": globals().get("AUTO_EV_HI_PCT", 99.0),
+            "AUTO_EV_HI_CAP": globals().get("AUTO_EV_HI_CAP", 0.90),
+            "AUTO_EV_DOWNSAMPLE": globals().get("AUTO_EV_DOWNSAMPLE", 8),
+            "AUTO_EV_BOUNDS": globals().get("AUTO_EV_BOUNDS", (-4.0, 6.0)),
+            "AUTO_EV_ITERS": globals().get("AUTO_EV_ITERS", 16),
+            "BLACKPOINT_PCT": globals().get("BLACKPOINT_PCT", None),
+            "WHITEPOINT_PCT": globals().get("WHITEPOINT_PCT", None),
+            "SHADOW_LIFT": globals().get("SHADOW_LIFT", 0.0),
+            "CONTRAST_STRENGTH": globals().get("CONTRAST_STRENGTH", 0.0),
+            "SATURATION": globals().get("SATURATION", 1.0),
+        }
+        initializer = functools.partial(_init_worker_globals, settings_dict)
+
+        with ProcessPoolExecutor(max_workers=workers, initializer=initializer) as ex:
             futs = [ex.submit(process_one, str(f), **task_kwargs) for f in files]
             for fut in as_completed(futs):
                 res = fut.result()
