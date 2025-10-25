@@ -187,29 +187,19 @@ def verify_metadata(src_path: Path, dst_path: Path,
 
 def verify_icc_profile(src_path: Path, dst_path: Path) -> bool:
     """
-    Verify ICC profile was preserved.
-    Uses Pillow to check embedded profiles.
+    Verify ICC profile is present in destination JPEG.
+    Only checks the destination file (source TIFFs may not be readable by Pillow).
     """
     try:
         from PIL import Image
 
-        src_img = Image.open(src_path)
+        # Only check destination JPEG - source TIFFs may be 32-bit float which Pillow can't handle
         dst_img = Image.open(dst_path)
-
-        src_icc = src_img.info.get('icc_profile')
         dst_icc = dst_img.info.get('icc_profile')
 
-        # If source has ICC, dest must have it too
-        if src_icc and not dst_icc:
+        # Verify destination has an ICC profile embedded
+        if not dst_icc or len(dst_icc) == 0:
             return False
-
-        # If both have ICC, they should match (or at least exist)
-        if src_icc and dst_icc:
-            # Quick check: compare first 100 bytes
-            if src_icc[:100] != dst_icc[:100]:
-                # Different profiles - might be sRGB conversion, which is OK
-                # Just verify dst has SOME profile
-                return len(dst_icc) > 0
 
         return True
     except Exception as e:
