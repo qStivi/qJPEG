@@ -27,8 +27,8 @@ auto_ev_downsample: 4
 # Post-gamma shaping
 blackpoint_pct: 2.0   # For 32-bit float: 2-5% works better than 0.2%
 whitepoint_pct: 98.0  # Clip top 2% to eliminate gray veil
-shadows: 0.15         # Lift dark subjects
-contrast: 0.06
+shadows: 0.0          # DISABLED - causes gray veil when applied after black/white remap
+contrast: 0.0         # DISABLED - S-curve compresses range, re-adding gray veil
 saturation: 1.06
 
 # SSIM quality search

@@ -157,9 +157,9 @@ python main.py "/full/library" --config production --workers 16 --resume
 ### Shadow Lift (`--shadows`)
 - **What it does**: Brightens dark areas without affecting highlights
 - **Range**: 0.0 (no lift) to 0.5 (strong lift)
-- **Typical**: 0.10 - 0.25
-- **Symptom**: Subjects too dark despite good sky exposure
-- **Fix**: Increase shadows (e.g., `--shadows 0.20`)
+- **⚠️ WARNING**: Currently DISABLED in all presets (set to 0.0)
+- **Reason**: When applied after black/white point remapping, it lifts blacks from 0.0 to 0.01+, re-adding gray veil
+- **Status**: Feature needs to be reimplemented in linear space (before gamma) instead of display space (after gamma)
 
 ### Auto-Exposure Mid Target (`--auto-ev-mid`)
 - **What it does**: Target luminance for mid-tones (after tone mapping)
@@ -177,18 +177,27 @@ python main.py "/full/library" --config production --workers 16 --resume
 
 ### Black/White Point
 - **What it does**: Maps luminance percentiles to pure black/white
-- **Defaults**: 0.2 / 99.7
+- **Defaults**: 2.0-3.0 / 97.0-98.0 (32-bit float), 0.5 / 99.5 (16-bit)
 - **Symptom**: Gray veil, washed out appearance
-- **Fix**: Tighten range (e.g., `--blackpoint-pct 0.3 --whitepoint-pct 99.5`)
+- **Fix**: For 32-bit float, use higher percentiles (e.g., `--blackpoint-pct 3.0 --whitepoint-pct 97.0`)
+- **Note**: Must be applied WITHOUT shadow lift or contrast to avoid re-adding gray veil
+
+### Contrast (`--contrast`)
+- **What it does**: S-curve adjustment around midpoint
+- **Range**: 0.0 (no curve) to 0.5 (strong curve)
+- **⚠️ WARNING**: Currently DISABLED in all presets (set to 0.0)
+- **Reason**: S-curve compresses dynamic range from [0,1] to [0.07,0.93], re-adding gray veil
+- **Status**: Feature needs redesign or removal
 
 ## Tips & Tricks
 
 1. **Always specify both** `--blackpoint-pct` and `--whitepoint-pct` together, or use neither
-2. **Use `--shadows` instead of increasing `--auto-ev-mid`** when highlights are already good
+2. **Keep shadows=0.0 and contrast=0.0** to avoid gray veil (see GRAY_VEIL_DEBUG_JOURNEY.md for details)
 3. **Start with calibration tool** - saves hours of trial and error
 4. **Use `--quick` preset** for testing, then switch to quality preset for final run
 5. **Enable `--resume`** for large batches - you can stop/restart anytime
 6. **Check `--debug-json` output** to understand what's happening under the hood
+7. **Verify output range:** `"out_min": 0.0, "out_max": 1.0` means no gray veil
 
 ## Troubleshooting
 

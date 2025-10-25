@@ -23,8 +23,8 @@ auto_ev_mode: off
 # Post-gamma shaping
 blackpoint_pct: 2.0
 whitepoint_pct: 98.0
-shadows: 0.0                 # Adjust manually if needed
-contrast: 0.0
+shadows: 0.0          # Keep at 0 to avoid gray veil
+contrast: 0.0         # Keep at 0 to avoid gray veil
 saturation: 1.0
 
 # SSIM quality search

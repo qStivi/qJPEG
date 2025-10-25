@@ -27,8 +27,8 @@ auto_ev_downsample: 4
 # Post-gamma shaping (AGGRESSIVE for float32)
 blackpoint_pct: 3.0   # Clip bottom 3% - eliminates gray blacks
 whitepoint_pct: 97.0  # Clip top 3% - eliminates gray whites
-shadows: 0.20         # Extra shadow lift for float images
-contrast: 0.08        # Slightly more contrast
+shadows: 0.0          # DISABLED - causes gray veil when applied after black/white remap
+contrast: 0.0         # DISABLED - S-curve compresses range, re-adding gray veil
 saturation: 1.08      # Slightly more saturation
 
 # SSIM quality search

@@ -138,8 +138,8 @@ class Calibrator:
             "auto_ev_downsample": 4,
             "blackpoint_pct": 2.0,   # For 32-bit float images
             "whitepoint_pct": 98.0,  # For 32-bit float images
-            "shadows": 0.15,
-            "contrast": 0.06,
+            "shadows": 0.0,          # DISABLED - causes gray veil
+            "contrast": 0.0,         # DISABLED - compresses range
             "saturation": 1.06,
             "ssim": 0.99,
             "ssim_downsample": 4,

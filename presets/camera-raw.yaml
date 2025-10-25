@@ -27,8 +27,8 @@ auto_ev_downsample: 8
 # Post-gamma shaping
 blackpoint_pct: 2.5   # Higher for float images
 whitepoint_pct: 97.5  # Lower for float images
-shadows: 0.12
-contrast: 0.08
+shadows: 0.0          # DISABLED - causes gray veil
+contrast: 0.0         # DISABLED - S-curve compresses range
 saturation: 1.08
 
 # SSIM quality search
