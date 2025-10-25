@@ -336,7 +336,14 @@ class Calibrator:
         p.parent.mkdir(parents=True, exist_ok=True)
 
         with open(p, 'w') as f:
-            yaml.dump(self.params, f, default_flow_style=False, sort_keys=False)
+            # Use custom representer for lists to make them inline [x, y] instead of block style
+            class FlowListDumper(yaml.SafeDumper):
+                pass
+            def represent_list(dumper, data):
+                return dumper.represent_sequence('tag:yaml.org,2002:seq', data, flow_style=True)
+            FlowListDumper.add_representer(list, represent_list)
+
+            yaml.dump(self.params, f, Dumper=FlowListDumper, default_flow_style=False, sort_keys=False)
 
         print(f"\n[SAVED] Preset saved to: {p}")
         print(f"\nYou can now use this preset with:")

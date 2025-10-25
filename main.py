@@ -1222,13 +1222,29 @@ def save_config(config_path: str, args: argparse.Namespace):
             # Skip default values for cleaner config
             if key in ['qmin', 'qmax'] and value in [1, 100]:
                 continue
-            config[key] = value
+
+            # Convert comma-separated strings back to lists for proper YAML formatting
+            if key == 'tiff_smart16_pct' and isinstance(value, str) and ',' in value:
+                parts = [float(x.strip()) for x in value.split(',')]
+                config[key] = parts
+            elif key == 'auto_ev_bounds' and isinstance(value, str) and ',' in value:
+                parts = [float(x.strip()) for x in value.split(',')]
+                config[key] = parts
+            else:
+                config[key] = value
 
     try:
         p = Path(config_path)
         p.parent.mkdir(parents=True, exist_ok=True)
         with open(p, 'w') as f:
-            yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+            # Use custom representer for lists to make them inline [x, y] instead of block style
+            class FlowListDumper(yaml.SafeDumper):
+                pass
+            def represent_list(dumper, data):
+                return dumper.represent_sequence('tag:yaml.org,2002:seq', data, flow_style=True)
+            FlowListDumper.add_representer(list, represent_list)
+
+            yaml.dump(config, f, Dumper=FlowListDumper, default_flow_style=False, sort_keys=False)
         print(f"[CONFIG] Saved to: {p}")
     except Exception as e:
         print(f"[ERROR] Failed to save config: {e}")
