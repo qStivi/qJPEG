@@ -13,6 +13,7 @@ from .image_io import load_image_as_rgb
 from .image_processing import MapStats
 from .quality import ssim_threshold_search, brisque_score_cv2, save_final_jpeg
 from .metadata import copy_sidecars, copy_all_metadata_with_exiftool
+from .config import parse_args, load_config, save_config, DEFAULT_BRISQUE_MODEL, DEFAULT_BRISQUE_RANGE
 from .utils import (
     ensure_dir,
     has_exiftool,
@@ -42,6 +43,12 @@ __all__ = [
     # Metadata
     "copy_sidecars",
     "copy_all_metadata_with_exiftool",
+    # Config
+    "parse_args",
+    "load_config",
+    "save_config",
+    "DEFAULT_BRISQUE_MODEL",
+    "DEFAULT_BRISQUE_RANGE",
     # Utils
     "ensure_dir",
     "has_exiftool",
