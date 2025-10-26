@@ -29,7 +29,7 @@ except Exception:
 from .utils import dest_path_for, collect_sources, find_flat_collisions
 from .metadata import copy_sidecars, copy_all_metadata_with_exiftool
 from .image_io import load_image_as_rgb
-from .quality import ssim_threshold_search, brisque_score_cv2, save_final_jpeg
+from .quality import ssim_threshold_search, brisque_score_cv2, brisque_score_with_moire_check, save_final_jpeg
 
 
 def _init_worker_globals(settings_dict):
@@ -146,14 +146,23 @@ def process_one(
     if exiftool_mode == "all":
         copy_all_metadata_with_exiftool(src_path_p, dst_path)
 
-    # Optional BRISQUE report
+    # Optional BRISQUE report with moiré detection
     bq = None
+    bq_unreliable = False
+    moire_info = {}
     if brisque_model and brisque_range and HAVE_CV2_BRISQUE:
         try:
             comp_arr = np.array(Image.open(dst_path).convert("RGB"))
-            bq = brisque_score_cv2(comp_arr, brisque_model, brisque_range)
+            # Use moiré-aware BRISQUE scoring
+            bq, bq_unreliable, moire_info = brisque_score_with_moire_check(
+                comp_arr, brisque_model, brisque_range,
+                check_moire=True,  # Enable moiré detection
+                multiscale_verify=False  # Can be enabled for extra verification
+            )
         except Exception:
             bq = None
+            bq_unreliable = False
+            moire_info = {}
 
     # Stats
     try:
@@ -194,6 +203,9 @@ def process_one(
         "quality": q,
         "ssim": float(ssim_val),
         "brisque": bq,
+        "brisque_unreliable": bq_unreliable,
+        "moire_detected": moire_info.get("moire_detected", False),
+        "moire_confidence": moire_info.get("moire_confidence", 0.0),
         "saved_pct": saved
     }
 
@@ -311,9 +323,16 @@ def process_tree(
             elif res and res.get("skipped"):
                 print(f"[SKIP] {res['src']}")
             elif res:
+                # Format BRISQUE output with moiré warning if detected
+                brisque_str = ""
+                if res['brisque'] is not None:
+                    brisque_str = f", BRISQUE={res['brisque']:.2f}"
+                    if res.get('brisque_unreliable') or res.get('moire_detected'):
+                        brisque_str += " (⚠️ moiré)"
+
                 print(f"[OK] {res['src']} -> {res['dst']}  "
                       f"quality={res['quality']}, SSIM={res['ssim']:.4f}"
-                      + (f", BRISQUE={res['brisque']:.2f}" if res['brisque'] is not None else "")
+                      + brisque_str
                       + (f" | saved {res['saved_pct']:.1f}%" if 'saved_pct' in res and res['saved_pct'] is not None else ""))
             _tick()
             results.append(res)
@@ -356,9 +375,16 @@ def process_tree(
                 elif res and res.get("skipped"):
                     print(f"[SKIP] {res['src']}")
                 elif res:
+                    # Format BRISQUE output with moiré warning if detected
+                    brisque_str = ""
+                    if res['brisque'] is not None:
+                        brisque_str = f", BRISQUE={res['brisque']:.2f}"
+                        if res.get('brisque_unreliable') or res.get('moire_detected'):
+                            brisque_str += " (⚠️ moiré)"
+
                     print(f"[OK] {res['src']} -> {res['dst']}  "
                           f"quality={res['quality']}, SSIM={res['ssim']:.4f}"
-                          + (f", BRISQUE={res['brisque']:.2f}" if res['brisque'] is not None else "")
+                          + brisque_str
                           + (f" | saved {res['saved_pct']:.1f}%" if 'saved_pct' in res and res['saved_pct'] is not None else ""))
                 _tick()
                 results.append(res)
