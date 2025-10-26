@@ -235,12 +235,71 @@ def detect_moire_fft(arr: np.ndarray, threshold: float = 0.10, min_peak_ratio: f
         return False, 0.0, debug
 
 
+def brisque_score_multiscale(
+    arr: np.ndarray,
+    model_path: Optional[str],
+    range_path: Optional[str],
+    downsample_factor: int = 2
+) -> Tuple[Optional[float], Optional[float], float]:
+    """
+    Compute BRISQUE at multiple scales to detect artifacts.
+
+    Moiré patterns often disappear when images are downsampled, causing
+    large differences in BRISQUE scores between scales. This can help
+    verify moiré detection.
+
+    Args:
+        arr: uint8 RGB array
+        model_path: Path to BRISQUE model YAML
+        range_path: Path to BRISQUE range YAML
+        downsample_factor: Factor to downsample by (default 2 = half resolution)
+
+    Returns:
+        Tuple of (score_full, score_downsampled, difference):
+        - score_full: BRISQUE score at original resolution
+        - score_downsampled: BRISQUE score after downsampling
+        - difference: Absolute difference between scores (high = likely artifact)
+
+    Examples:
+        >>> full, down, diff = brisque_score_multiscale(arr, "model.yml", "range.yml")
+        >>> if diff > 20:
+        ...     print(f"Large score difference ({diff:.1f}) suggests artifacts")
+    """
+    # Compute at full resolution
+    score_full = brisque_score_cv2(arr, model_path, range_path)
+
+    # Downsample and compute again
+    h, w = arr.shape[:2]
+    new_h, new_w = h // downsample_factor, w // downsample_factor
+
+    if new_h < 50 or new_w < 50:
+        # Too small to downsample meaningfully
+        return score_full, None, 0.0
+
+    try:
+        # Use _downsample_arr from image_processing module
+        arr_down = _downsample_arr(arr, downsample_factor)
+        score_down = brisque_score_cv2(arr_down, model_path, range_path)
+    except Exception:
+        return score_full, None, 0.0
+
+    # Calculate difference
+    if score_full is not None and score_down is not None:
+        diff = abs(score_full - score_down)
+    else:
+        diff = 0.0
+
+    return score_full, score_down, diff
+
+
 def brisque_score_with_moire_check(
     arr: np.ndarray,
     model_path: Optional[str],
     range_path: Optional[str],
     check_moire: bool = True,
-    moire_threshold: float = 0.10
+    moire_threshold: float = 0.10,
+    multiscale_verify: bool = False,
+    multiscale_diff_threshold: float = 20.0
 ) -> Tuple[Optional[float], bool, Dict[str, Any]]:
     """
     Compute BRISQUE score with optional moiré pattern detection.
@@ -254,6 +313,8 @@ def brisque_score_with_moire_check(
         range_path: Path to BRISQUE range YAML
         check_moire: Whether to run moiré detection (default True)
         moire_threshold: Threshold for moiré detection (0-1)
+        multiscale_verify: Use multi-scale BRISQUE to verify detection
+        multiscale_diff_threshold: Score difference threshold (default 20.0)
 
     Returns:
         Tuple of (brisque_score, unreliable_flag, debug_info):
@@ -267,6 +328,11 @@ def brisque_score_with_moire_check(
         ... )
         >>> if unreliable:
         ...     print(f"Warning: BRISQUE={score:.1f} may be unreliable (moiré detected)")
+
+        >>> # With multi-scale verification
+        >>> score, unreliable, info = brisque_score_with_moire_check(
+        ...     img_arr, "model.yml", "range.yml", multiscale_verify=True
+        ... )
     """
     # Compute BRISQUE score
     brisque = brisque_score_cv2(arr, model_path, range_path)
@@ -283,6 +349,24 @@ def brisque_score_with_moire_check(
             'moire_confidence': confidence,
             'moire_debug': debug
         }
+
+        # Optional: Multi-scale verification
+        if multiscale_verify and (has_moire or brisque is None or brisque > 40):
+            # Only run expensive multi-scale if:
+            # 1. Moiré detected, OR
+            # 2. BRISQUE unavailable, OR
+            # 3. BRISQUE score is suspiciously high (>40 = fair/poor quality)
+            score_full, score_down, diff = brisque_score_multiscale(
+                arr, model_path, range_path
+            )
+            moire_info['multiscale_full'] = score_full
+            moire_info['multiscale_down'] = score_down
+            moire_info['multiscale_diff'] = diff
+
+            # If scores differ significantly, mark as unreliable
+            if diff > multiscale_diff_threshold:
+                unreliable = True
+                moire_info['multiscale_unreliable'] = True
 
     return brisque, unreliable, moire_info
 
