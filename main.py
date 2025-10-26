@@ -789,7 +789,10 @@ def save_final_jpeg(
     src_img.save(dst_path, **save_kwargs)
 
 def copy_all_metadata_with_exiftool(src_path: Path, dst_path: Path):
-    """Copy ALL tags (EXIF/IPTC/XMP) from src to dst using exiftool, if available."""
+    """
+    Copy ALL tags (EXIF/IPTC/XMP) from src to dst using exiftool, if available.
+    Also sets filesystem modification/creation dates to match EXIF DateTimeOriginal.
+    """
     if not EXIFTOOL_OK:
         return
     cmd = [
@@ -797,6 +800,9 @@ def copy_all_metadata_with_exiftool(src_path: Path, dst_path: Path):
         "-overwrite_original",
         "-All:All",
         "-TagsFromFile", str(src_path),
+        # Set filesystem dates to match EXIF DateTimeOriginal
+        "-FileModifyDate<DateTimeOriginal",
+        "-FileCreateDate<DateTimeOriginal",  # Works on macOS/Windows, ignored on Linux ext4
         str(dst_path),
     ]
     subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
