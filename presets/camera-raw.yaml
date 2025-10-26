@@ -1,0 +1,43 @@
+# Camera RAW Preset
+# For camera RAW files (DNG, CR2, NEF, ARW, etc.)
+# More conservative highlight protection
+
+# Input/Output
+types: dng,cr2,cr3,nef,arw,orf,rw2,raf,srw,pef
+demosaic: AHD
+
+# Smart16 (percentile stretching)
+tiff_smart16: true
+tiff_smart16_pct: [0.5, 99.5]
+tiff_smart16_perchannel: false  # Global curve for safer colors
+smart16_downsample: 4
+
+# Tone mapping pipeline
+tiff_float_tonemap: aces
+tiff_gamma: 2.2
+
+# Auto-exposure (per-image)
+auto_ev_mode: mid_guard
+auto_ev_mid: 0.18
+auto_ev_mid_pct: 50
+auto_ev_hi_pct: 99.0         # Protect fewer pixels (only extreme highlights)
+auto_ev_hi_cap: 0.88         # More aggressive highlight protection
+auto_ev_downsample: 8
+
+# Post-gamma shaping
+blackpoint_pct: 2.5   # Higher for float images
+whitepoint_pct: 97.5  # Lower for float images
+shadows: 0.0          # DISABLED - causes gray veil
+contrast: 0.0         # DISABLED - S-curve compresses range
+saturation: 1.08
+
+# SSIM quality search
+ssim: 0.98
+ssim_downsample: 4
+ssim_luma_only: true
+
+# Performance
+no_brisque: true
+exiftool_mode: all           # Preserve all EXIF for RAW
+workers: 8
+resume: false

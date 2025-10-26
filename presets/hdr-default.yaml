@@ -1,0 +1,43 @@
+# HDR Default Preset
+# Optimized for high-bit-depth TIFF/RAW with HDR content
+# Balances exposure with highlight protection
+
+# Input/Output
+types: tif,tiff
+tiff_reader: tifffile
+
+# Smart16 (percentile stretching)
+tiff_smart16: true
+tiff_smart16_pct: [0.5, 99.0]
+tiff_smart16_perchannel: true
+smart16_downsample: 4
+
+# Tone mapping pipeline
+tiff_float_tonemap: aces
+tiff_gamma: 2.2
+
+# Auto-exposure (per-image)
+auto_ev_mode: mid_guard
+auto_ev_mid: 0.18
+auto_ev_mid_pct: 50
+auto_ev_hi_pct: 98.0
+auto_ev_hi_cap: 0.90
+auto_ev_downsample: 4
+
+# Post-gamma shaping
+blackpoint_pct: 2.0   # For 32-bit float: 2-5% works better than 0.2%
+whitepoint_pct: 98.0  # Clip top 2% to eliminate gray veil
+shadows: 0.0          # DISABLED - causes gray veil when applied after black/white remap
+contrast: 0.0         # DISABLED - S-curve compresses range, re-adding gray veil
+saturation: 1.06
+
+# SSIM quality search
+ssim: 0.99
+ssim_downsample: 4
+ssim_luma_only: true
+
+# Performance
+no_brisque: true
+exiftool_mode: all     # Preserve ALL metadata (EXIF, GPS, camera info, dates, etc.)
+workers: 8
+resume: false

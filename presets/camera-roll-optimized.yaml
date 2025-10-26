@@ -1,0 +1,26 @@
+#types: tif,tiff,dng,cr2,cr3,nef,arw,orf,rw2,raf,srw,pef
+tiff_reader: tifffile
+tiff_smart16: true
+tiff_smart16_pct: [0.5, 99.0]
+tiff_smart16_perchannel: true
+smart16_downsample: 4
+tiff_float_tonemap: aces
+tiff_gamma: 2.2
+auto_ev_mode: mid_guard
+auto_ev_mid: 0.2
+auto_ev_mid_pct: 50
+auto_ev_hi_pct: 98.0
+auto_ev_hi_cap: 0.9
+auto_ev_downsample: 4
+blackpoint_pct: 3.0
+whitepoint_pct: 97.0
+shadows: 0.05
+contrast: 0.0
+saturation: 1.08
+ssim: 0.99
+ssim_downsample: 4
+ssim_luma_only: true
+no_brisque: true
+exiftool_mode: all
+workers: 8
+resume: true
