@@ -22,6 +22,12 @@ except Exception:
     HAVE_CV2_QUALITY = False
     HAVE_CV2_BRISQUE = False
 
+try:
+    from scipy import ndimage
+    HAVE_SCIPY = True
+except Exception:
+    HAVE_SCIPY = False
+
 from .utils import ensure_dir
 from .image_processing import _downsample_arr, _rgb_to_luma8
 
@@ -119,6 +125,166 @@ def brisque_score_cv2(arr: np.ndarray, model_path: Optional[str], range_path: Op
         return float(score)
     except Exception:
         return None
+
+
+def detect_moire_fft(arr: np.ndarray, threshold: float = 0.10, min_peak_ratio: float = 1.5) -> Tuple[bool, float, Dict[str, Any]]:
+    """
+    Detect moiré patterns using FFT frequency analysis.
+
+    Moiré patterns create characteristic peaks in the frequency domain due to
+    aliasing between the camera sensor grid and display pixel grid. This function
+    detects such patterns by analyzing the 2D FFT magnitude spectrum.
+
+    Args:
+        arr: uint8 RGB array (will be converted to grayscale internally)
+        threshold: Confidence threshold for detection (0-1)
+                  Higher values = less sensitive (fewer false positives)
+                  Default 0.10 balances sensitivity and specificity
+        min_peak_ratio: Minimum ratio of peak magnitude to median magnitude
+                       Screen moiré typically creates peaks 1.5-3x above background
+                       Lower values = more sensitive but more false positives
+
+    Returns:
+        Tuple of (has_moire, confidence, debug_info):
+        - has_moire: Boolean indicating if moiré pattern detected
+        - confidence: Float 0-1 indicating detection confidence
+        - debug_info: Dict with diagnostic information
+
+    Examples:
+        >>> # Detect moiré in a screen photograph
+        >>> has_moire, conf, info = detect_moire_fft(screen_photo_arr)
+        >>> if has_moire:
+        ...     print(f"Moiré detected with {conf:.1%} confidence")
+        ...     print(f"Peak count: {info['peak_count']}")
+    """
+    debug = {
+        'available': HAVE_SCIPY and cv2 is not None,
+        'peak_count': 0,
+        'max_peak_strength': 0.0,
+        'median_magnitude': 0.0,
+        'detection_method': 'fft_frequency_analysis'
+    }
+
+    # Early exit if scipy unavailable
+    if not HAVE_SCIPY:
+        return False, 0.0, debug
+
+    try:
+        # Convert to grayscale for frequency analysis
+        if arr.ndim == 3:
+            # Use luminance weights for proper grayscale conversion
+            gray = np.dot(arr[..., :3], [0.299, 0.587, 0.114]).astype(np.float32)
+        else:
+            gray = arr.astype(np.float32)
+
+        debug['shape'] = gray.shape
+
+        # Apply 2D FFT and compute magnitude spectrum
+        fft = np.fft.fft2(gray)
+        fft_shifted = np.fft.fftshift(fft)  # Center DC component
+        magnitude = np.abs(fft_shifted)
+
+        # Log scale for better visualization and analysis
+        magnitude_log = np.log1p(magnitude)
+
+        # Mask out DC component and immediate neighbors (always strong)
+        h, w = magnitude_log.shape
+        cy, cx = h // 2, w // 2
+        dc_mask_radius = max(h, w) // 50  # Mask ~2% of spectrum
+        y, x = np.ogrid[:h, :w]
+        dc_mask = ((y - cy)**2 + (x - cx)**2 <= dc_mask_radius**2)
+        magnitude_masked = magnitude_log.copy()
+        magnitude_masked[dc_mask] = 0
+
+        # Compute statistics
+        median_mag = np.median(magnitude_masked[magnitude_masked > 0])
+        debug['median_magnitude'] = float(median_mag)
+
+        # Normalize magnitude spectrum
+        if median_mag > 0:
+            magnitude_norm = magnitude_masked / median_mag
+        else:
+            return False, 0.0, debug
+
+        # Detect peaks using threshold
+        # Moiré patterns create strong, isolated peaks away from DC
+        # Peaks should be at least min_peak_ratio times the median
+        peaks = magnitude_norm > min_peak_ratio
+        peak_count = np.sum(peaks)
+        debug['peak_count'] = int(peak_count)
+
+        if peak_count > 0:
+            max_peak = np.max(magnitude_norm[peaks])
+            debug['max_peak_strength'] = float(max_peak)
+
+            # Calculate confidence based on peak strength and count
+            # More peaks + stronger peaks = higher confidence
+            strength_factor = min(max_peak / 10.0, 1.0)  # Normalize to 0-1
+            count_factor = min(peak_count / 20.0, 1.0)   # 20+ peaks = very likely
+            confidence = (strength_factor + count_factor) / 2.0
+
+            has_moire = confidence >= threshold
+            debug['confidence_raw'] = float(confidence)
+
+            return has_moire, confidence, debug
+
+        return False, 0.0, debug
+
+    except Exception as e:
+        debug['error'] = str(e)
+        return False, 0.0, debug
+
+
+def brisque_score_with_moire_check(
+    arr: np.ndarray,
+    model_path: Optional[str],
+    range_path: Optional[str],
+    check_moire: bool = True,
+    moire_threshold: float = 0.10
+) -> Tuple[Optional[float], bool, Dict[str, Any]]:
+    """
+    Compute BRISQUE score with optional moiré pattern detection.
+
+    This wrapper extends brisque_score_cv2() to detect and flag images
+    with moiré patterns, which can produce unreliable BRISQUE scores.
+
+    Args:
+        arr: uint8 RGB array
+        model_path: Path to BRISQUE model YAML
+        range_path: Path to BRISQUE range YAML
+        check_moire: Whether to run moiré detection (default True)
+        moire_threshold: Threshold for moiré detection (0-1)
+
+    Returns:
+        Tuple of (brisque_score, unreliable_flag, debug_info):
+        - brisque_score: BRISQUE score (float) or None if unavailable
+        - unreliable_flag: True if moiré detected (score may be unreliable)
+        - debug_info: Dict with moiré detection details
+
+    Examples:
+        >>> score, unreliable, info = brisque_score_with_moire_check(
+        ...     img_arr, "model.yml", "range.yml"
+        ... )
+        >>> if unreliable:
+        ...     print(f"Warning: BRISQUE={score:.1f} may be unreliable (moiré detected)")
+    """
+    # Compute BRISQUE score
+    brisque = brisque_score_cv2(arr, model_path, range_path)
+
+    # Check for moiré patterns if requested
+    unreliable = False
+    moire_info = {}
+
+    if check_moire:
+        has_moire, confidence, debug = detect_moire_fft(arr, threshold=moire_threshold)
+        unreliable = has_moire
+        moire_info = {
+            'moire_detected': has_moire,
+            'moire_confidence': confidence,
+            'moire_debug': debug
+        }
+
+    return brisque, unreliable, moire_info
 
 
 def save_final_jpeg(
