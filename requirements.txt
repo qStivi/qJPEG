@@ -1,0 +1,29 @@
+# qJPEG Dependencies
+# Install with: pip install -r requirements.txt
+
+# Core image processing
+pillow>=10.0.0
+pillow-heif>=0.13.0
+
+# RAW image support
+rawpy>=0.18.0
+
+# TIFF handling
+tifffile>=2023.0.0
+
+# Quality metrics and image analysis
+scikit-image>=0.21.0
+opencv-contrib-python>=4.8.0
+
+# Scientific computing
+numpy>=1.24.0
+scipy>=1.10.0
+
+# Utilities
+tqdm>=4.65.0
+networkx>=3.0
+imageio>=2.31.0
+
+# Optional: YAML support for config files
+# Uncomment if you want to use config presets
+# pyyaml>=6.0

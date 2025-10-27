@@ -35,16 +35,17 @@
 ### Installation
 
 ```bash
-# Install dependencies
-pip install pillow pillow-heif rawpy tifffile scikit-image tqdm opencv-contrib-python
-
-# Install exiftool (macOS/Linux)
-brew install exiftool  # macOS
-apt install libimage-exiftool-perl  # Linux
-
 # Clone repository
 git clone https://github.com/qStivi/qJPEG
 cd qJPEG
+
+# Install Python dependencies
+pip install -r requirements.txt
+
+# Install exiftool (required for metadata preservation)
+brew install exiftool  # macOS
+apt install libimage-exiftool-perl  # Linux
+winget install exiftool.exiftool  # Windows
 ```
 
 ### Basic Usage
